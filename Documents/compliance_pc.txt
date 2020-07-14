@@ -1,0 +1,496 @@
+//****************************************************************************
+// Copyright(C) 2019, Kandou Bus S.A.
+//
+// The information contained herein is Kandou Bus S.A. confidential
+// and proprietary information and is for use by Kandou Bus S.A.
+// customers only.  The information may not be reproduced or modified
+// in any form without the prior written of Kandou Bus S.A.
+// Kandou Bus S.A. reserves the right to make changes to the
+// information at any time without notice.
+//
+//***************************************************************************
+
+//------------------- File details ------------------------------------------
+// File name     : svtb/uvc_lib/sv/cio/cio_ls_compliance_protocol_checker.sv
+// Developers    : Kevin Vasconcellos (vascon@kandou.com, kevin.vasconcellos@verilab.com)
+// Created       : 04/11/19
+//---------------------------------------------------------------------------
+
+`ifndef __CIO_LS_COMPLIANCE_PROTOCOL_CHECKER_SV__
+`define __CIO_LS_COMPLIANCE_PROTOCOL_CHECKER_SV__
+
+/// @class cio_ls_compliance_protocol_checker
+/// High Level (singal-sided) CIO LS + HS Compliance Protocol Checker container class
+///
+///------------------------------------------------------------------------------------------------
+class cio_ls_compliance_protocol_checker extends uvm_component;
+  localparam RSP = 0;
+  localparam CMD = 1;
+
+  virtual interface cio_hs_interface hvif;
+  virtual interface cio_hs_interface hvif_tx[mh16_param_pkg::CIO_NUM_HS_LANES];
+  virtual interface cio_hs_interface hvif_rx[mh16_param_pkg::CIO_NUM_HS_LANES];
+
+  cio_compliance_coverage compliance_coverage;
+  cio_protocol_checker  parent_handle, pc;  ///< Handle to parent (container) object
+  cio_env_cfg    env_cfg;  ///< Configuration object
+  int            lane_id;  ///< Which lane we're attached to
+
+  bit [31:0]               op_metadata_dw_tx;
+  cio_port_operation_t     opcode_tx;
+  cio_compliance_pattern_t pattern_tx;
+  bit [31:0]               op_metadata_dw_rx;
+  cio_port_operation_t     opcode_rx;
+  cio_compliance_pattern_t pattern_rx;
+
+  cio_ls_sequence_item_base ls_rx_pkt[1:0];  ///< Current LS Packet from RX monitor - 1 -> CMD pkt, 0 -> RSP pkt
+  cio_ls_sequence_item_base ls_tx_pkt[1:0];  ///< Current LS Packet from TX monitor - 1 -> CMD pkt, 0 -> RSP pkt
+
+  cio_hs_fsm_state_t m_hs_state     ;
+  cio_hs_fsm_state_t m_hs_rx_state  ;
+  cio_hs_fsm_state_t m_last_hs_state;
+
+  uvm_tlm_analysis_fifo #(cio_symbol_sequence_item) hs_symbol_fifo[mh16_param_pkg::CIO_NUM_HS_LANES];     ///< tx (?) symbols pulled off the wire. These are bit aligned and symbol aligned.
+  uvm_tlm_analysis_fifo #(cio_symbol_sequence_item) hs_rx_symbol_fifo[mh16_param_pkg::CIO_NUM_HS_LANES];  ///< rx symbols pulled off the wire. These are bit aligned and symbol aligned.
+
+  cio_symbol_sequence_item m_last_symbol;
+
+  bit ls_tx_compliance_active_lane[mh16_param_pkg::CIO_NUM_HS_LANES];
+  bit ls_rx_compliance_active_lane[mh16_param_pkg::CIO_NUM_HS_LANES];
+
+  int hs_tx_prbs_len[mh16_param_pkg::CIO_NUM_HS_LANES];
+  int hs_rx_prbs_len[mh16_param_pkg::CIO_NUM_HS_LANES];
+
+  cio_symbol_sequence_item hs_tx_prev_sym[mh16_param_pkg::CIO_NUM_HS_LANES];
+  cio_symbol_sequence_item hs_rx_prev_sym[mh16_param_pkg::CIO_NUM_HS_LANES];
+
+  // Compliance Check Enables
+  bit start_end_compliance_pair_chk_en = 1; ///< Enable Start/End Compliance Command Pairing Check
+  bit port_op_err_chk_en = 1;               ///< Enable Port Operation Result Check
+  bit compliance_pattern_chk_en = 1;        ///< Enable HS DATA Compliance Pattern Check
+  // Compliance Check Counters
+  int start_end_compliance_pair_chk_count =0; ///< Start/End Compliance Command Pairing Check Count
+  int port_op_err_chk_count =0;               ///< Port Operation Result Check Count
+  int compliance_pattern_chk_count =0;        ///< HS DATA Compliance Pattern Check Count
+
+  uvm_tlm_analysis_fifo #(cio_ls_sequence_item_base) ls_tx_fifo;  ///< Low Speed transactions from 'active' mon
+  uvm_tlm_analysis_fifo #(cio_ls_sequence_item_base) ls_rx_fifo;  ///< Low Speed transactions from 'passive' mon
+
+  `uvm_component_utils_begin(cio_ls_compliance_protocol_checker)
+    `uvm_field_object (parent_handle,                    UVM_ALL_ON | UVM_NOPRINT)
+    `uvm_field_object (pc,                               UVM_ALL_ON | UVM_NOPRINT)
+    `uvm_field_object (env_cfg,                          UVM_ALL_ON | UVM_NOPRINT)
+    `uvm_field_int    (lane_id,                          UVM_ALL_ON)
+
+    // Compliance Check Enables
+    `uvm_field_int (start_end_compliance_pair_chk_en,    UVM_ALL_ON)
+    `uvm_field_int (port_op_err_chk_en,                  UVM_ALL_ON)
+    `uvm_field_int (compliance_pattern_chk_en,           UVM_ALL_ON)
+
+    // Compliance Check Counters
+    `uvm_field_int (start_end_compliance_pair_chk_count, UVM_ALL_ON)
+    `uvm_field_int (port_op_err_chk_count,               UVM_ALL_ON)
+    `uvm_field_int (compliance_pattern_chk_count,        UVM_ALL_ON)
+  `uvm_component_utils_end
+
+  //----------------------------------------------------------------------------------------------
+  /// Constructor
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+    ls_tx_fifo = new($sformatf("ls_tx_fifo"), this);
+    ls_rx_fifo = new($sformatf("ls_rx_fifo"), this);
+    for (int hsl = 0; hsl < mh16_param_pkg::CIO_NUM_HS_LANES; hsl++) begin
+      hs_symbol_fifo[hsl]    = new($sformatf("hs_symbol_fifo[%0d]", hsl), this);
+      hs_rx_symbol_fifo[hsl] = new($sformatf("hs_rx_symbol_fifo[%0d]", hsl), this);
+    end
+  endfunction : new
+
+  //----------------------------------------------------------------------------------------------
+  /// UVM build phase
+  function void build_phase(uvm_phase phase);
+    string    who_am_i = "";
+
+    super.build_phase(phase);
+    $cast(parent_handle, get_parent());
+    pc = parent_handle; // Create an alias for ease of use/less typing
+
+    compliance_coverage = cio_compliance_coverage::type_id::create("compliance_coverage", this);
+
+    who_am_i = get_name();
+    `uvm_info(get_name(), $sformatf("Info - who_am_i = \"%0s\"", who_am_i), UVM_DEBUG)
+    if (env_cfg.cio_vip_host_role == 1) begin
+      who_am_i = "host";
+    end else begin
+      who_am_i = "device";
+    end
+    `uvm_info(get_name(), $sformatf("Info - who_am_i? I am the %0s", who_am_i), UVM_HIGH)
+
+    for (int hsl = 0; hsl < mh16_param_pkg::CIO_NUM_HS_LANES; hsl++) begin
+      if (!uvm_config_db#(virtual interface cio_hs_interface)::get(null, $sformatf("uvm_test_top.tb.%0s_cio.hs_rx[%0d].mon", who_am_i, hsl), $sformatf("hs_if_%0d", hsl), hvif)) begin
+        `uvm_fatal($sformatf("NOVIF[%0d]", hsl), $sformatf("vif not set for: %0s:  uvm_test_top.tb.%0s_cio.hs_rx[%0d].mon.hvif", get_name(), who_am_i, hsl))
+      end
+//      if (!uvm_config_db#(virtual interface cio_hs_interface)::get(null, $sformatf("uvm_test_top.tb.%0s_cio.hs_tx[%0d].mon", who_am_i, hsl), $sformatf("hs_if_%0d", hsl), hvif)) begin
+//        `uvm_fatal($sformatf("NOVIF[%0d]", hsl), $sformatf("vif not set for: %0s:  uvm_test_top.tb.%0s_cio.hs_tx[%0d].mon.hvif", get_name(), who_am_i, hsl))
+//      end
+    end
+  endfunction : build_phase
+//uvm_config_db#(virtual cio_hs_interface)::set(null, $sformatf("*.host_cio.hs_tx[%0d].*", c),   $sformatf("hs_if_%0d", c), host_hs_tx_if);
+//uvm_config_db#(virtual cio_hs_interface)::set(null, $sformatf("*.host_cio.hs_rx[%0d].*", c),   $sformatf("hs_if_%0d", c), host_hs_rx_if);
+
+  //----------------------------------------------------------------------------------------------
+  /// UVM Connect phase
+  /// Connect the virtual sequencer.
+  function void connect_phase(uvm_phase phase);
+    for (int hsl = 0; hsl < mh16_param_pkg::CIO_NUM_HS_LANES; hsl++) begin
+      ls_tx_compliance_active_lane[hsl] = 0;
+      ls_tx_compliance_active_lane[hsl] = 0;
+    end
+  endfunction : connect_phase
+
+  //----------------------------------------------------------------------------------------------
+  /// UVM run phase
+  virtual task run_phase(uvm_phase phase);
+    super.run_phase(phase);
+    `uvm_info("LS_COMPLIANCE_CHK", "Inside the run_phase", UVM_HIGH)
+
+    fork
+      process_tx_commands(lane_id);
+      process_rx_commands(lane_id);
+    join_none
+    for (int hsl = 0; hsl < mh16_param_pkg::CIO_NUM_HS_LANES; hsl++) begin
+      automatic int idx = hsl;
+      fork
+        process_hs_tx_symbols(idx);
+        process_hs_rx_symbols(idx);
+      join_none
+    end
+  endtask : run_phase
+
+  //------------------------------------------------------------------------------------------------
+  /// Check LS TX packets that target the TXFFE register
+  virtual task process_tx_commands(input int ls_lane);
+    cio_ls_sequence_item_base tx_trans;
+    cio_rt_sequence_item_base ls_rt;
+    cio_at_sequence_item_base ls_at;
+    string pkt_str;
+    bit    cmd_rsp_n;
+
+    `uvm_info("LS_COMPLIANCE_CHK", $sformatf("process_tx_commands(): Start - for ls_lane %0d.", ls_lane), UVM_HIGH)
+    forever begin
+      pkt_str = "XXX";
+      cmd_rsp_n = 'bX;
+      ls_tx_fifo.get(tx_trans);
+      `uvm_info("LS_COMPLIANCE_CHK", {"process_tx_commands: LS Tx transaction\n%s", tx_trans.sprint()}, UVM_HIGH)
+      if (tx_trans.trans_type == LT_TRANS) begin
+        continue;
+      end
+      if (tx_trans.trans_type == RT_TRANS) begin
+        if ($cast(ls_rt, tx_trans)) begin
+          pkt_str = "RT";
+          cmd_rsp_n = ls_rt.cmd_not_resp;
+          if ((ls_rt.cmd_not_resp) && (ls_rt.rt_cmd_type == RT_Broadcast)) begin
+            `uvm_info("LS_COMPLIANCE_CHK", "process_tx_commands: This is an RT Broadcast command transaction", UVM_MEDIUM)
+            continue;
+          end
+        end
+      end
+      // Drop all packets that aren't compliance/port operation register accesses
+      if (tx_trans.data_reg == OPCODE_REG || tx_trans.data_reg == METADATA_REG /*|| tx_trans.data_reg == DATA_REG*/) begin
+        if ($cast(ls_at, tx_trans)) begin
+          pkt_str = "AT";
+          cmd_rsp_n = ls_at.cmd_not_resp;
+        end else if ($cast(ls_rt, tx_trans)) begin
+          pkt_str = "RT";
+          cmd_rsp_n = ls_rt.cmd_not_resp;
+        end else begin
+          pkt_str = "UNK";
+          cmd_rsp_n = 1'bZ;
+          `uvm_error({get_type_name(), " : LS_COMPLIANCE_CHK"}, $sformatf("process_tx_commands: Malformed Compliance/Port Operation LS transaction @%0d (%0s %0s)", tx_trans, pkt_str, ((cmd_rsp_n == 1'b1) ? "CMD" : "RSP")))
+          return;
+        end
+        `uvm_info("LS_COMPLIANCE_CHK", $sformatf("process_tx_commands: Found Compliance/Port Operation LS transaction @%0d (%0s %0s %0s) - %p", tx_trans, pkt_str, ((tx_trans.data_wnr) ? "WR" : "RD"), ((cmd_rsp_n == 1'b1) ? "CMD" : "RSP"), tx_trans.data), UVM_MEDIUM)
+        `uvm_info("LS_COMPLIANCE_CHK", $sformatf("process_tx_commands: Found Compliance/Port Operation LS transaction @%0d (%0s %0s) <-> %p", tx_trans, pkt_str, ((cmd_rsp_n == 1'b1) ? "CMD" : "RSP"), tx_trans), UVM_FULL)
+
+
+        // Look for START_BER_TEST/END_BER_TEST, START_BER_TEST/END_BURST_TEST, SET_TX_COMPLIANCE
+        // Look for START_BER_TEST/SET_TX_COMPLIANCE to indicate start of compliance hs data
+        // Look for END_BER_TEST/END_BURST_TEST to indicate end of compliance hs data
+        // Pattern is OP Metadata DW0, [12:9]
+
+        // Drop WR RSP packets since data should be all 0's (No Error)
+        // Drop RD CMD packets since they are uninteresting
+        if (!((tx_trans.data_wnr && !cmd_rsp_n) || (!tx_trans.data_wnr && cmd_rsp_n))) begin
+          `uvm_info("LS_COMPLIANCE_CHK", $sformatf("process_tx_commands: Adding transaction (@%0d) to ls_tx_pkt[%0d]", tx_trans, cmd_rsp_n), UVM_MEDIUM)
+          ls_tx_pkt[cmd_rsp_n] = tx_trans;
+        end
+        //Catches Write Command
+        if (tx_trans.data_wnr && cmd_rsp_n) begin
+          if (tx_trans.data_reg == OPCODE_REG) begin
+            opcode_tx = cio_port_operation_t'({tx_trans.data[5], tx_trans.data[4], tx_trans.data[3], tx_trans.data[2]});
+            `uvm_info("LS_COMPLIANCE_CHK", $sformatf("process_tx_commands: opcode_tx = %0s (0x%8h) written to OPCODE_REG. Using pattern_tx = %0s", opcode_tx.name(), opcode_tx, pattern_tx.name()), UVM_MEDIUM)
+//            hvif.dbg_compliance_port_operation <= opcode_tx/*.name()*/;
+            hvif.dbg_compliance_port_operation <= 1; fork begin @(hvif.hs_mon_cb); hvif.dbg_compliance_port_operation <= 0; end join_none
+            if (opcode_tx == START_BER_TEST || opcode_tx == SET_TX_COMPLIANCE) begin
+//              hvif.dbg_compliance_pattern <= pattern_tx/*.name()*/;
+              `uvm_info("LS_COMPLIANCE_CHK", $sformatf("process_tx_commands: opcode_tx = %0s. Toggling dbg_compliance_pattern & dbg_compliance_pattern_data", opcode_tx.name()), UVM_MEDIUM)
+              hvif.dbg_compliance_pattern <= 1; fork begin @(hvif.hs_mon_cb); hvif.dbg_compliance_pattern <= 0; end join_none
+              hvif.dbg_compliance_pattern_data <= 1;
+              ls_tx_compliance_active_lane[/*hs_lane*/] = 1;
+            end else if (opcode_tx == END_BER_TEST || opcode_tx == END_BURST_TEST) begin
+              hvif.dbg_compliance_pattern_data <= 0;
+              ls_tx_compliance_active_lane[/*hs_lane*/] = 0;
+              hs_tx_prbs_len[/*hs_lane*/] = null;
+              hs_tx_prev_sym[/*hs_lane*/] = null;
+            end else begin
+              //hvif.dbg_compliance_pattern_data <= 0;
+            end
+          end
+          if (tx_trans.data_reg == METADATA_REG) begin
+            op_metadata_dw_tx = {tx_trans.data[3], tx_trans.data[2], tx_trans.data[1], tx_trans.data[0]};
+            pattern_tx = cio_compliance_pattern_t'(op_metadata_dw_tx[12:9]);
+          end
+          `uvm_info(get_full_name(), $sformatf("Triggered ls_tx_wr_cmd"), UVM_MEDIUM)
+        end
+        //Catches Read Command
+        if (!tx_trans.data_wnr && cmd_rsp_n) begin
+          if (tx_trans.data_reg == OPCODE_REG) begin
+//            hvif.dbg_compliance_pattern <= "-n/a-";
+//            hvif.dbg_compliance_port_operation <= "-None-";
+          end
+          `uvm_info(get_full_name(), $sformatf("Triggered ls_tx_rd_cmd"), UVM_MEDIUM)
+        end
+      end else begin
+        `uvm_info("LS_COMPLIANCE_CHK", "process_tx_commands: Dropping LS transaction", UVM_DEBUG)
+      end
+    end
+  endtask : process_tx_commands
+
+  //------------------------------------------------------------------------------------------------
+  /// Check LS RX packets that target the TXFFE register
+  virtual task process_rx_commands(input int ls_lane);
+    cio_ls_sequence_item_base rx_trans;
+    cio_rt_sequence_item_base ls_rt;
+    cio_at_sequence_item_base ls_at;
+    string pkt_str;
+    bit    cmd_rsp_n;
+
+    `uvm_info("LS_COMPLIANCE_CHK", $sformatf("process_rx_commands(): Start - for ls_lane %0d.", ls_lane), UVM_HIGH)
+    forever begin
+      pkt_str = "XXX";
+      cmd_rsp_n = 'bX;
+      ls_rx_fifo.get(rx_trans);
+      `uvm_info("LS_COMPLIANCE_CHK", {"process_rx_commands: LS Rx transaction\n", rx_trans.sprint()}, UVM_HIGH)
+      if (rx_trans.trans_type == LT_TRANS) begin
+        continue;
+      end
+      if (rx_trans.trans_type == RT_TRANS) begin
+        if ($cast(ls_rt, rx_trans)) begin
+          pkt_str = "RT";
+          cmd_rsp_n = ls_rt.cmd_not_resp;
+          if ((ls_rt.cmd_not_resp) && (ls_rt.rt_cmd_type == RT_Broadcast)) begin
+            `uvm_info("LS_COMPLIANCE_CHK", "process_rx_commands: This is an RT Broadcast command transaction", UVM_MEDIUM)
+            continue;
+          end
+        end
+      end
+      // Drop all packets that aren't compliance/port operation register accesses
+      if (rx_trans.data_reg == OPCODE_REG || rx_trans.data_reg == METADATA_REG || rx_trans.data_reg == DATA_REG) begin
+        if ($cast(ls_at, rx_trans)) begin
+          pkt_str = "AT";
+          cmd_rsp_n = ls_at.cmd_not_resp;
+        end else if ($cast(ls_rt, rx_trans)) begin
+          pkt_str = "RT";
+          cmd_rsp_n = ls_rt.cmd_not_resp;
+        end else begin
+          pkt_str = "UNK";
+          cmd_rsp_n = 1'bZ;
+          `uvm_error({get_type_name(), " : LS_COMPLIANCE_CHK"}, $sformatf("process_rx_commands: Malformed Compliance/Port Opertion LS transaction @%0d (%0s %0s)", rx_trans, pkt_str, ((cmd_rsp_n == 1'b1) ? "CMD" : "RSP")))
+            return;
+        end
+        `uvm_info("LS_COMPLIANCE_CHK", $sformatf("process_rx_commands: Found Compliance/Port Operation LS transaction @%0d (%0s %0s %0s) - %p", rx_trans, pkt_str, ((rx_trans.data_wnr) ? "WR" : "RD"), ((cmd_rsp_n == 1'b1) ? "CMD" : "RSP"), rx_trans.data), UVM_MEDIUM)
+        `uvm_info("LS_COMPLIANCE_CHK", $sformatf("process_rx_commands: Found Compliance/Port Operation LS transaction @%0d (%0s %0s) <-> %p", rx_trans, pkt_str, ((cmd_rsp_n == 1'b1) ? "CMD" : "RSP"), rx_trans), UVM_FULL)
+
+
+        // Look for START_BER_TEST/END_BER_TEST, START_BER_TEST/END_BURST_TEST, SET_TX_COMPLIANCE
+        // Look for START_BER_TEST/SET_TX_COMPLIANCE to indicate start of compliance hs data
+        // Look for END_BER_TEST/END_BURST_TEST to indicate end of compliance hs data
+        // Pattern is OP Metadata DW0, [12:9]
+
+        // Drop WR RSP packets since data should be all 0's (No Error)
+        // Drop RD CMD packets since they are uninteresting
+        if (!((rx_trans.data_wnr && !cmd_rsp_n) || (!rx_trans.data_wnr && cmd_rsp_n))) begin
+          `uvm_info("LS_COMPLIANCE_CHK", $sformatf("process_rx_commands: Adding transaction (@%0d) to ls_rx_pkt[%0d]", rx_trans, cmd_rsp_n), UVM_MEDIUM)
+          ls_rx_pkt[cmd_rsp_n] = rx_trans;
+        end
+        //Catches Write Response
+        if (rx_trans.data_wnr && !cmd_rsp_n) begin
+          `uvm_info(get_full_name(), $sformatf("Triggered ls_rx_wr_rsp"), UVM_MEDIUM)
+        end
+        //Catches Read Response
+        if (!rx_trans.data_wnr && !cmd_rsp_n) begin
+          `uvm_info(get_full_name(), $sformatf("Triggered ls_rx_rd_rsp"), UVM_MEDIUM)
+        end
+        //Catches Read Command
+        if (!rx_trans.data_wnr && cmd_rsp_n) begin
+          `uvm_info(get_full_name(), $sformatf("Triggered ls_rx_rd_cmd"), UVM_MEDIUM)
+        end
+      end else begin
+        `uvm_info("LS_COMPLIANCE_CHK", "process_rx_commands: Dropping ls transaction", UVM_DEBUG)
+      end
+    end // forever begin
+  endtask : process_rx_commands
+
+  //-------------------------------------------------------------------------------------------------
+  /// Process symbols sent on our high speed TX path
+  ///
+  virtual task process_hs_tx_symbols(input int lane);
+    cio_symbol_sequence_item raw_item;
+    cio_symbol_sequence_item current;
+    int compliance_set_count; ///< Number of potential compliance data sets we've seen.
+    bit tmp_symbol_bvec[];
+
+    m_hs_state   = RESET;
+
+    forever begin
+      hs_symbol_fifo[lane].get(raw_item);
+      $cast(current,raw_item.clone());
+      current.set_name($sformatf("%s_current", get_full_name()));
+
+      // Take state from current item
+      m_hs_state = raw_item.my_kind;
+
+      // Perform actions based on the symbol kind.
+      case (m_hs_state)
+        DATA :
+          begin
+            `uvm_info("HS_COMPLIANCE_CHK", $sformatf("process_hs_tx_symbols[%0d]: ", lane), UVM_MEDIUM)
+            // If compliance is active, analyze & check the HS DATA, else just discard the data
+            if (ls_tx_compliance_active_lane[lane]) begin
+              check_compliance_pattern(lane, hs_tx_prev_sym[lane], current);
+            end
+          end
+      endcase // case (m_hs_state)
+
+      `uvm_info(get_name(), $sformatf("HS_COMPLIANCE_CHK: %s %h", m_hs_state.name(), current.qwords[0]), UVM_DEBUG)
+      if (m_last_hs_state != m_hs_state) begin
+        timber(m_hs_state.name(), lane);
+      end
+
+      m_last_hs_state      = m_hs_state;
+      m_last_symbol        = current;
+      hs_tx_prev_sym[lane] = current;
+    end
+  endtask : process_hs_tx_symbols
+
+  //-------------------------------------------------------------------------------------------------
+  /// Process symbols coming in on the RX path. These are 'responses' to our TX traffic.
+  virtual task process_hs_rx_symbols(input int lane);
+    cio_symbol_sequence_item raw_item;
+    cio_symbol_sequence_item current;
+
+    m_hs_rx_state = RESET;
+
+    forever begin
+      hs_rx_symbol_fifo[lane].get(raw_item);
+      $cast(current,raw_item.clone());
+
+      m_hs_rx_state = raw_item.my_kind;
+      case (m_hs_rx_state)
+        DATA: begin
+          `uvm_info("HS_COMPLIANCE_CHK", $sformatf("process_hs_rx_symbols[%0d]: ", lane), UVM_MEDIUM)
+//rm                if (m_last_hs_rx_state == TS2) begin
+//rm                  b2b_ts2_count++;
+//rm                end else begin
+//rm                  b2b_ts2_count=0;
+//rm                end
+              end
+      endcase
+    end
+  endtask : process_hs_rx_symbols
+
+  //------------------------------------------------------------------------------------------------
+  /// Logging. Get it.
+  virtual function void timber(string str, int lane);
+    string spacer;
+
+    if (env_cfg.ls_agent_cfg[0].dump_trans_tracker_files) begin
+      spacer = {(lane * 12){" "}};
+      `uvm_info("HS_TRANS_TRACKER",$sformatf("%0s%8s", spacer, str), UVM_NONE)
+    end
+  endfunction : timber
+
+  //------------------------------------------------------------------------------------------------
+  /// Logging. Get it.
+  virtual function void check_start_end_compliance_pair(input int lane, input cio_ls_sequence_item_base trans);
+    cio_rt_sequence_item_base m_rt_item;
+    bit [31:0] item_data;
+
+    if (!$cast(m_rt_item, trans)) `uvm_fatal(get_full_name(), "Couldn't cast RT Transaction");
+    item_data = {m_rt_item.data[5], m_rt_item.data[4], m_rt_item.data[3], m_rt_item.data[2]};
+
+    `uvm_info("HS_COMPLIANCE_CHK",$sformatf("check_start_end_compliance_pair[%0d]: ", lane), UVM_NONE)
+    //if (ls_tx_compliance_active_lane[lane] && start_end_compliance_pair_chk_en) begin
+    //  `uvm_error("HS_TRANS_TRACKER",$sformatf("ERR! completion code found in response to port operation command."))
+    //  //start_end_compliance_pair_chk_count++;
+    //end
+  endfunction : check_start_end_compliance_pair
+
+      //check_port_op_err();
+  //------------------------------------------------------------------------------------------------
+  /// Logging. Get it.
+  virtual function void check_port_op_err(input int lane, input cio_ls_sequence_item_base trans);
+    cio_rt_sequence_item_base m_rt_item;
+    bit [31:0] item_data;
+
+    if (!$cast(m_rt_item, trans)) `uvm_fatal(get_full_name(), "Couldn't cast RT Transaction");
+    item_data = {m_rt_item.data[5], m_rt_item.data[4], m_rt_item.data[3], m_rt_item.data[2]};
+
+    `uvm_info("HS_COMPLIANCE_CHK",$sformatf("check_port_op_err[%0d]: ", lane), UVM_NONE)
+    //if (trans is read rsp to opcode reg) begin
+    //  if (trans.read_data == cio_pkg::ERR && port_op_err_chk_en) begin
+    //    `uvm_error("HS_TRANS_TRACKER",$sformatf("ERR! completion code found in response to port operation command."))
+    //  end
+    //  //start_end_compliance_pair_chk_count++;
+    //end
+  endfunction : check_port_op_err
+
+  //------------------------------------------------------------------------------------------------
+  /// Logging. Get it.
+  virtual function void check_compliance_pattern(input int lane, input cio_symbol_sequence_item prev_sym, input cio_symbol_sequence_item curr_sym);
+    string direction;
+    `uvm_info("HS_COMPLIANCE_CHK",$sformatf("check_compliance_pattern[%0d]: ", lane), UVM_NONE)
+    if (compliance_pattern_chk_en) begin
+      if (curr_sym.is_compliance_pattern() != -1) begin
+        err_flag = cio_pkg::prbs_check_64(hs_tx_prbs_len[lane], prev_sym.qw[1], prev_sym.qw[0]);
+        `uvm_info(get_name(), $sformatf("PRBS%0d: 64 - CHECK %0s for prev_prbs = %64b   data_in = %64b", this.prbs_len, err_flag == 1 ? "FAILED" : "PASSED", prev_sym.qw[1], prev_sym.qw[0]), UVM_MEDIUM)
+        compliance_pattern_chk_count++;
+      end
+    end
+    //compliance_coverage.sample_hs_cov(curr_sym, direction);//tx or rx
+  endfunction : check_compliance_pattern
+
+  //----------------------------------------------------------------------------------------------
+  // UVM report_phase
+  function void report_phase(uvm_phase phase);
+    string str = "\n";
+    build_report(str);
+    `uvm_info(get_type_name(), str, UVM_MEDIUM)
+  endfunction : report_phase
+
+  //----------------------------------------------------------------------------------------------
+  // build_report
+  // Called to build the report string
+  virtual function void build_report(inout string str);
+    `uvm_info(get_type_name(), $sformatf("REPORT: [Compliance] build_report() - Started for compliance protocol checker [%0d]", lane_id), UVM_FULL)
+    if (start_end_compliance_pair_chk_count > 0) $sformat(str, "%s\tCheck %0s executed %0d times\n", str, "start_end_compliance_pair_chk", start_end_compliance_pair_chk_count);
+    if (port_op_err_chk_count               > 0) $sformat(str, "%s\tCheck %0s executed %0d times\n", str, "port_op_err_chk", port_op_err_chk_count);
+    if (compliance_pattern_chk_count        > 0) $sformat(str, "%s\tCheck %0s executed %0d times\n", str, "compliance_pattern_chk", compliance_pattern_chk_count);
+    $sformat(str, "%s\t-----\n", str);
+    if (start_end_compliance_pair_chk_count == 0) $sformat(str, "%s\tCheck %0s executed %0d times\n", str, "start_end_compliance_pair_chk", start_end_compliance_pair_chk_count);
+    if (port_op_err_chk_count               == 0) $sformat(str, "%s\tCheck %0s executed %0d times\n", str, "port_op_err_chk", port_op_err_chk_count);
+    if (compliance_pattern_chk_count        == 0) $sformat(str, "%s\tCheck %0s executed %0d times\n", str, "compliance_pattern_chk", compliance_pattern_chk_count);
+  endfunction : build_report
+
+endclass : cio_ls_compliance_protocol_checker
+
+`endif // __CIO_LS_COMPLIANCE_PROTOCOL_CHECKER_SV__

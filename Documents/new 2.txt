@@ -1,0 +1,1003 @@
+//****************************************************************************
+// Copyright(C) 2019, Kandou Bus S.A.
+//
+// The information contained herein is Kandou Bus S.A. confidential
+// and proprietary information and is for use by Kandou Bus S.A.
+// customers only.  The information may not be reproduced or modified
+// in any form without the prior written of Kandou Bus S.A.
+// Kandou Bus S.A. reserves the right to make changes to the
+// information at any time without notice.
+//
+//***************************************************************************
+
+//------------------- File details ------------------------------------------
+// File name     : svtb/uvc_lib/sv/cio/cio_ffe_protocol_checker.sv
+// Developers    : Kevin Vasconcellos (vascon@kandou.com, kevin.vasconcellos@verilab.com)
+// Created       : 22/05/19
+//---------------------------------------------------------------------------
+
+`ifndef __CIO_FFE_PROTOCOL_CHECKER_SV__
+`define __CIO_FFE_PROTOCOL_CHECKER_SV__
+
+/// @class cio_ffe_protocol_checker
+/// High Level (singal-sided) CIO FFE Protocol Checker container class
+class cio_ffe_protocol_checker extends uvm_component;
+
+  cio_env_cfg    env_cfg;            ///< Configuration object
+
+  uvm_event      cio_link_init_start_phase_5;  ///< Start of link train Phase 5
+  uvm_event      cio_link_init_end_phase_5;    ///< End of link train Phase 5
+
+  event      got_ls_tx_pkt_event[mh16_param_pkg::CIO_NUM_LS_LANES];    ///< Event indicating a new LS TX packet has been unloaded from the analysis port/fifo
+  event      got_ls_rx_pkt_event[mh16_param_pkg::CIO_NUM_LS_LANES];    ///< Event indicating a new LS RX packet has been unloaded from the analysis port/fifo
+  event      got_lt_resume_event[mh16_param_pkg::CIO_NUM_HS_LANES];    ///< Event indicating a new LT_Resume packet has been unloaded from the analysis port/fifo
+  event      got_lt_resume_2_event[mh16_param_pkg::CIO_NUM_HS_LANES];  ///< Event indicating a new LT_Resume_2 packet has been unloaded from the analysis port/fifo
+
+  cio_ls_sequence_item_base ls_rx_pkt[mh16_param_pkg::CIO_NUM_LS_LANES];   ///< Current LS Packet from RX monitor
+  cio_ls_sequence_item_base ls_tx_pkt[mh16_param_pkg::CIO_NUM_LS_LANES];   ///< Current LS Packet from TX monitor
+
+  uvm_event_pool local_event_pool;                 ///< reference to shared event pool for just this VIP instance.
+  uvm_event      ffe_done_lane[mh16_param_pkg::CIO_NUM_HS_LANES];
+
+  uvm_tlm_analysis_fifo #(cio_ls_sequence_item_base) ls_tx_fifo[mh16_param_pkg::CIO_NUM_LS_LANES];        ///< Low Speed transactions from 'active' mon
+  uvm_tlm_analysis_fifo #(cio_ls_sequence_item_base) ls_rx_fifo[mh16_param_pkg::CIO_NUM_LS_LANES];        ///< Low Speed transactions from 'passive' mon
+  uvm_tlm_analysis_fifo #(cio_at_sequence_item_base) ls_at_cmd_fifo[mh16_param_pkg::CIO_NUM_LS_LANES];    ///< Low Speed AT transactions from 'active' mon
+
+  // Check Enables
+  bit                ls_crc_chk_en  = 1; ///< Enable Low Speed CRC Check
+  bit                ls_lt_resume_2_lane_chk_en  = 1; ///< Enable Low Speed LT Resume 2 Lane ID Check
+  bit                ls_xxx_chk_en  = 1; ///< Enable Low Speed XXX Check
+  bit                ffe_watch_for_xxx_en = 1; ///< Enable the watch for XXX task
+
+  // Check Counters
+  int                ls_crc_chk_count  = 0; ///< Low Speed CRC Check Count
+  int                ls_lt_resume_2_lane_chk_count  = 0; ///< Low Speed LT Resume 2 Lane ID Check Count
+  int                ls_xxx_chk_count  = 0; ///< Low Speed XXX Check Count
+
+  // Check supporting fields
+//  bit                ls_junk_chk_got_first_trans = 0; ///< 1st LS trans (with junk) detected
+  int                num_phase5 = 0;
+
+  `uvm_component_utils_begin(cio_ffe_protocol_checker)
+    `uvm_field_object (env_cfg,                       UVM_ALL_ON | UVM_NOPRINT)
+    // LS Check Enables
+    `uvm_field_int    (ls_crc_chk_en,                 UVM_ALL_ON)
+    `uvm_field_int    (ls_lt_resume_2_lane_chk_en,    UVM_ALL_ON)
+    `uvm_field_int    (ls_xxx_chk_en,                 UVM_ALL_ON)
+    `uvm_field_int    (ffe_watch_for_xxx_en,          UVM_ALL_ON)
+    // LS Check Counts
+    `uvm_field_int    (ls_crc_chk_count,              UVM_ALL_ON)
+    `uvm_field_int    (ls_lt_resume_2_lane_chk_count, UVM_ALL_ON)
+    `uvm_field_object (local_event_pool,              UVM_DEFAULT)
+  `uvm_component_utils_end
+
+  //----------------------------------------------------------------------------------------------
+  /// Constructor
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+    for (int idx = 0; idx < mh16_param_pkg::CIO_NUM_LS_LANES; idx++) begin
+      ls_tx_fifo[idx]          = new($sformatf("%s[%0d]", "ls_tx_fifo", idx), this);
+      ls_rx_fifo[idx]          = new($sformatf("%s[%0d]", "ls_rx_fifo", idx), this);
+      ls_at_cmd_fifo[idx]      = new($sformatf("%s[%0d]", "ls_at_cmd_fifo", idx), this);
+   end
+  endfunction : new
+
+  //----------------------------------------------------------------------------------------------
+  /// UVM build phase
+  function void build_phase(uvm_phase phase);
+    super.build_phase(phase);
+  endfunction : build_phase
+
+  //----------------------------------------------------------------------------------------------
+  /// UVM Connect phase
+  /// Connect the virtual sequencer.
+  function void connect_phase(uvm_phase phase);
+  endfunction : connect_phase
+
+  //----------------------------------------------------------------------------------------------
+  /// UVM run phase
+  virtual task run_phase(uvm_phase phase);
+    super.run_phase(phase);
+    `uvm_info({get_type_name(), " : FFE_CHK"}, "Inside the run_phase", UVM_HIGH)
+
+    cio_link_init_start_phase_5 = local_event_pool.get("cio_link_init_start_phase_5");
+    cio_link_init_end_phase_5   = local_event_pool.get("cio_link_init_end_phase_5");
+
+    foreach (ffe_done_lane[i]) begin
+      ffe_done_lane[i] = local_event_pool.get($sformatf("ffe_done_lane[%0d]",i));
+    end
+
+//    write_ffe_tracker_header();
+    fork
+      process_tx_commands(0);
+      process_rx_commands(0);
+      spawn_ffe_flow_check();
+    join_none
+
+    if (!env_cfg.skip_phase5) begin
+      num_phase5++;
+    end
+  endtask : run_phase
+
+  //----------------------------------------------------------------------------------------------
+  // UVM report_phase
+  function void report_phase(uvm_phase phase);
+    string str = "\n";
+    $sformat(str, "%s\tChecked FFE status %0d times\n", str, num_phase5);
+    `uvm_info({get_type_name(), " : FFE_CHK"}, str, UVM_MEDIUM)
+  endfunction : report_phase
+
+  //------------------------------------------------------------------------------------------------
+  /// Write header to symbol and transaction tracker files
+  virtual function void write_ffe_tracker_header();
+//    if (env_cfg.ls_agent_cfg[0].dump_trans_tracker_files) begin
+//      // Print a header
+//      `uvm_info({"HS_TRANS_TRACKER", "Transaction Logger", UVM_NONE)
+//      `uvm_info({"HS_TRANS_TRACKER", "--- lane[0] --- lane[1] ----------------------", UVM_NONE)
+//    end
+  endfunction : write_ffe_tracker_header
+
+  //------------------------------------------------------------------------------------------------
+  /// Kick off a Phase 5 / TxFFE flow check when enabled and triggered
+  ///
+  virtual task spawn_ffe_flow_check();
+    int ffe_iteration = 0;
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("spawn_ffe_flow_check(): Start - "), UVM_LOW)
+    while (1) begin
+      ffe_iteration++;
+      `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("spawn_ffe_flow_check(): Start - FFE iteration %0d", ffe_iteration), UVM_LOW)
+    /*
+     while true
+       // skipping phase5
+       if skip_phase4 && skip_phase5
+         start forever loop with threads watching for change in skip_phase4/5 (& exit if ph5 not skipped)
+         continue
+       if !skip_phase4 && skip_phase5
+         start forever loop with threads watching for change in skip_phase4/5 (& exit if ph5 not skipped)
+         continue
+
+       // Do phase5
+       //   if ph4 is skipped, first TxFFE Reg access starts elapsed time
+       if skip_phase4 && !skip_phase5
+         start check flow
+       //   if ph4 is enabled, LT_Resume starts elapsed time
+       if !skip_phase4 && !skip_phase5
+         wait for phase4 broadcast || lt_gen_2 || lt_gen_3
+         start check flow
+
+       // elapsed time stops on clock sw done (?) detected
+     end
+     */
+
+      if (env_cfg.skip_phase5 == 1) begin
+        `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("spawn_ffe_flow_check(): Start - wait_ffe_cfg_change()"), UVM_LOW)
+        wait_ffe_cfg_change();
+        `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("spawn_ffe_flow_check():  Done - wait_ffe_cfg_change()"), UVM_LOW)
+      end else if (env_cfg.skip_phase5 == 0) begin
+        if (env_cfg.skip_phase4 == 0) begin
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("spawn_ffe_flow_check(): Start - wait(got_lt_resume_event[{0,1}].triggered)"), UVM_LOW)
+          //wait(got_lt_resume_event[0].triggered or got_lt_resume_event[1].triggered); //FIXME: make sizeable, one per lane
+          //FIXME: make sizeable, one per lane
+          fork begin : protection_ph5
+            fork
+              //@(got_lt_resume_event[0]);
+              //@(got_lt_resume_event[1]);
+              wait(got_lt_resume_event[0].triggered);
+              wait(got_lt_resume_event[1].triggered);
+            join_any
+            disable fork;
+          end join // protection_ph5
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("spawn_ffe_flow_check():  Done - wait(got_lt_resume_event[{0,1}].triggered)"), UVM_LOW)
+          ffe_flow_check();
+        end else if (env_cfg.skip_phase4 == 1) begin
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("spawn_ffe_flow_check(): Start - wait(got_ls_{t,r}x_pkt_event[{0,1}].triggered)"), UVM_LOW)
+          //wait(got_ls_tx_pkt_event[0].triggered); //FIXME: make sizeable, one per lane
+          //FIXME: make sizeable, one per lane
+          fork begin : protection_ph4
+            fork
+              //@(got_ls_tx_pkt_event[0]);
+              //@(got_ls_tx_pkt_event[1]);
+              //@(got_ls_rx_pkt_event[0]);
+              //@(got_ls_rx_pkt_event[1]);
+              wait(got_ls_tx_pkt_event[0].triggered);
+              wait(got_ls_tx_pkt_event[1].triggered);
+              wait(got_ls_rx_pkt_event[0].triggered);
+              wait(got_ls_rx_pkt_event[1].triggered);
+            join_any
+            disable fork;
+          end join // protection_ph4
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("spawn_ffe_flow_check():  Done - wait(got_ls_{t,r}x_pkt_event[{0,1}].triggered)"), UVM_LOW)
+          ffe_flow_check();
+        end else begin
+          `uvm_fatal({get_type_name(), " : FFE_CHK"}, $sformatf("spawn_ffe_flow_check(): Illegal value for env_cfg.skip_phase4 = %0d", env_cfg.skip_phase4))
+        end
+      end else begin
+        `uvm_fatal({get_type_name(), " : FFE_CHK"}, $sformatf("spawn_ffe_flow_check(): Illegal value for env_cfg.skip_phase5 = %0d", env_cfg.skip_phase5))
+      end
+      `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("spawn_ffe_flow_check():  Done - FFE iteration %0d", ffe_iteration), UVM_LOW)
+        #1; //for now
+    end // while (1)
+  endtask : spawn_ffe_flow_check
+
+  //------------------------------------------------------------------------------------------------
+  /// Waits for skip_phase4 or skip_phase5 to be cleared
+  ///
+  virtual task wait_ffe_cfg_change();
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("wait_ffe_cfg_change(): Start - skip_phase4 = %0d, skip_phase5 = %0d", env_cfg.skip_phase4, env_cfg.skip_phase5), UVM_LOW)
+    @(env_cfg.skip_phase4 or env_cfg.skip_phase5) begin
+      // wait for CFG variable to change value
+      // Nothing to actually do. Once the @ triggers, return to caller
+    end
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("wait_ffe_cfg_change():  Done - skip_phase4 = %0d, skip_phase5 = %0d - Change detected", env_cfg.skip_phase4, env_cfg.skip_phase5), UVM_LOW)
+  endtask : wait_ffe_cfg_change
+
+  //------------------------------------------------------------------------------------------------
+  /// Phase 5 / TxFFE flow check
+  ///
+  virtual task ffe_flow_check();
+    int master_ffe_timeout_multiplier = 2500; //FIXME: get from timing_cfg
+    bit dummy_flow_done;
+    bit [7:0] dummy_flow_state;
+    cio_txffe_rule_id_t rule_id;
+
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("ffe_flow_check(): Start - "), UVM_LOW)
+
+    fork begin : protection
+      fork
+        begin : ffe_threads
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("ffe_flow_check(): Start - ffe_threads"), UVM_LOW)
+          fork
+            begin : lane0_tx
+              if (env_cfg.at_reg.enabling_decision_lane0 == 1) begin
+                `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("ffe_flow_check(): Start - lane0_tx"), UVM_LOW)
+                start_txffe_flow_check(.lane(0), .dir("tx"), .flow_done(dummy_flow_done), .flow_state(dummy_flow_state), .rule_id(rule_id));
+                #1;//for now
+              end
+            end
+            begin : lane0_rx
+              if (env_cfg.at_reg.enabling_decision_lane0 == 1) begin
+                `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("ffe_flow_check(): Start - lane0_rx"), UVM_LOW)
+                start_txffe_flow_check(.lane(0), .dir("rx"), .flow_done(dummy_flow_done), .flow_state(dummy_flow_state), .rule_id(rule_id));
+                #1;//for now
+              end
+            end
+            begin : lane1_tx
+              if (env_cfg.at_reg.enabling_decision_lane1 == 1) begin
+                `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("ffe_flow_check(): Start - lane1_tx"), UVM_LOW)
+                start_txffe_flow_check(.lane(1), .dir("tx"), .flow_done(dummy_flow_done), .flow_state(dummy_flow_state), .rule_id(rule_id));
+                #1;//for now
+              end
+            end
+            begin : lane1_rx
+              if (env_cfg.at_reg.enabling_decision_lane1 == 1) begin
+                `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("ffe_flow_check(): Start - lane1_rx"), UVM_LOW)
+                start_txffe_flow_check(.lane(1), .dir("rx"), .flow_done(dummy_flow_done), .flow_state(dummy_flow_state), .rule_id(rule_id));
+                #1;//for now
+              end
+            end
+          join
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("ffe_flow_check():  Done - ffe_threads"), UVM_LOW)
+        end // block: ffe_threads
+        begin : master_ffe_watchdog
+          // Watchdog timeout thread
+//          master_ffe_timeout_multiplier = timing_cfg.master_ffe_timeout_multiplier;
+          master_ffe_timeout_multiplier = (master_ffe_timeout_multiplier * ((env_cfg.at_reg.enabling_decision_lane0 == 1) + (env_cfg.at_reg.enabling_decision_lane1 == 1)) * (env_cfg.txffe_index_q.size()));
+          #(/*base_ffe_timeout*/ * master_ffe_timeout_multiplier * 1.0us);
+          `uvm_error({get_type_name(), " : FFE_CHK"}, $sformatf("Timeout waiting for FFE threads to complete"))
+        end // block: master_ffe_watchdog
+      join_any
+      disable fork;
+    end join // protection
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("ffe_flow_check():  Done - "), UVM_LOW)
+  endtask : ffe_flow_check
+
+  //----------------------------------------------------------------------------------------------
+  /// start_txffe_flow_check
+  /// This task will start the TxFFE flow check thread based on its inputs
+  task start_txffe_flow_check(input bit lane, input string dir = "tx", inout bit flow_done, inout bit [7:0] flow_state, output cio_txffe_rule_id_t rule_id);
+    bit val;
+    cio_txffe_flow_t flow_choice;
+    if (!(lane inside { [0 : mh16_param_pkg::CIO_NUM_HS_LANES - 1] } )) begin
+      `uvm_fatal({get_type_name(), " : FFE_CHK"}, $sformatf("start_txffe_flow_check(): Illegal lane number (%0d) specified.", lane))
+    end
+    if (!(dir inside { "tx", "rx" } )) begin
+      `uvm_fatal({get_type_name(), " : FFE_CHK"}, $sformatf("start_txffe_flow_check(): Illegal direction (%0s) specified.", dir))
+    end
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("start_txffe_flow_check(): Start - Lane %0d, %0s", lane, dir), UVM_LOW)
+    flow_done = 0;
+    flow_state = 8'h1;
+    flow_choice = env_cfg.pick_txffe_flow(rule_id);
+    env_cfg.flow_choice = flow_choice;
+    //pass the rule_id_int to env_cfg for coverage report
+//    env_cfg.rule_id = rule_id_int;
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("start_txffe_flow_check(): Flow choice is %0s", flow_choice.name()), UVM_LOW)
+//    while (!flow_done) begin
+      case (flow_choice)
+        // -- RtrA executes Tx Flow
+        // -- RtrB executes Rx Flow
+        // -- (Cxx) is the "rule" ID. This is used in the pick_txffe_flow() case statement comments
+        SYMMETRIC_RT:
+          begin
+            // RTR/RT: (C10) For all USB4 (non-legacy) cases
+            // RTR:    (C11) For Legacy Router to same assy on-board RT
+            // RT:     (C12) For Legacy router-adjacent on-board RT
+            // RT:     (C13) For Legacy on-board RT to same assy on-board RT
+            // **:******* Special case below -- TODO: confirm symmetric AT vs. RT for this. Using symmetric RT for now
+            // RT:     (C14) For Legacy Cable RT to Cable RT - Optional behavior (undefined in CIO spec)
+            if (dir == "tx") begin
+              `RUN_TXFFE_FLOW(sym, tx, rt, flow_state, flow_done, lane)
+            end else begin
+              `RUN_TXFFE_FLOW(sym, rx, rt, flow_state, flow_done, lane)
+            end
+          end
+        SYMMETRIC_AT:
+          begin
+            // - AT w/ (Tx Flow ? recip = 0 : recip = 1)
+            // RTR: (C21) For Legacy Router to opposite assy on-board RT
+            // RTR: (C22) For Legacy Router to opposite router
+            // RT:  (C23) For Legacy PASSIVE cable cable-adjacent on-board RT (AT w/ recip = 1)
+            // **:******* Special case below -- TODO: confirm symmetric AT vs. RT for this. Using symmetric RT for now
+            // RT:  (C24) For Legacy Cable RT to Cable RT - Optional behavior (undefined in CIO spec)
+            if (dir == "tx") begin
+              `RUN_TXFFE_FLOW(sym, tx, at, flow_state, flow_done, lane)
+            end else begin
+              `RUN_TXFFE_FLOW(sym, rx, at, flow_state, flow_done, lane)
+            end
+          end
+        LEGACY_PRIMARY_ASYMMETRIC:
+          begin
+            // RTR: (C31) For Legacy Router to Cable RT (AT w/ recip = 0)
+            // RT:  (C32) For Legacy cable-adjacent on-board RT (AT w/ recip = 0)
+            if (dir == "tx") begin
+              `RUN_TXFFE_FLOW(asym, tx, primary, flow_state, flow_done, lane)
+            end else begin
+              `RUN_TXFFE_FLOW(asym, rx, primary, flow_state, flow_done, lane)
+            end
+          end
+        LEGACY_SUBORDINATE_ASYMMETRIC:
+          begin
+            // RT: (C41) For Legacy Cable RT (AT w/ recip = 0)
+            if (dir == "tx") begin
+              `RUN_TXFFE_FLOW(asym, tx, subordinate, flow_state, flow_done, lane)
+            end else begin
+              `RUN_TXFFE_FLOW(asym, rx, subordinate, flow_state, flow_done, lane)
+            end
+          end
+        default:
+          begin
+            cio_txffe_flow_t flow_id;
+            flow_id = env_cfg.pick_txffe_flow(rule_id);
+            `uvm_error({get_type_name(), " : FFE_CHK"}, $sformatf("start_txffe_flow_check(): Lane %0d - Error in case - FLOW ID = %0s is not defined", lane, flow_id.name()))
+          end
+      endcase // case (env_cfg.pick_txffe_flow(rule_id))
+//    end
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("start_txffe_flow_check(): Done  - Lane %0d - %0s Flow (%0s)", lane, (dir == "tx" ? "Transmitter" : (dir == "rx" ? "Receiver" : "UNKNOWN")), dir), UVM_MEDIUM)
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("start_txffe_flow_check():  Done - Lane %0d, %0s", lane, dir), UVM_LOW)
+      #1;//for now
+  endtask : start_txffe_flow_check
+
+  //----------------------------------------------------------------------------------------------
+  /// sym_tx_rt_flow_fsm
+  /// This task is a simple wrapper that passes the correct transaction type to the sym_tx_flow_fsm() task
+  ///
+  task sym_tx_rt_flow_fsm(inout bit [7:0] state, output bit done, input bit lane);
+    sym_tx_flow_fsm(state, done, lane, "rt");
+  endtask : sym_tx_rt_flow_fsm
+
+  //----------------------------------------------------------------------------------------------
+  /// sym_tx_at_flow_fsm
+  /// This task is a simple wrapper that passes the correct transaction type to the sym_tx_flow_fsm() task
+  ///
+  task sym_tx_at_flow_fsm(inout bit [7:0] state, output bit done, input bit lane);
+    sym_tx_flow_fsm(state, done, lane, "at");
+  endtask : sym_tx_at_flow_fsm
+
+  //----------------------------------------------------------------------------------------------
+  /// sym_tx_flow_fsm
+  /// This task will perform the symmetric transmitter TxFFE flow check for non-Legacy units
+  ///
+  //------------------------------------------------------------------------------------------------
+  // FFE checks
+  //
+  // - SYM TX, RDs
+  // -1- rx locked set, if locked, start clock switch done (with current RSP) and lt resume 2 checks as needed
+  // -2- new request set; count number of new requests
+  // -3- new request clear -> polling - timeout & count (try) errors [step 2-3 loop]
+  // ---- timeout value could be (N * t_poll_max) + M
+  // ---- if new request, sample txffe_setting value & cover
+  // -3- new request clear, if new request - timeout & count (try) errors [step 5-6 loop]
+  //
+  task sym_tx_flow_fsm(inout bit [7:0] state, inout bit done, input bit lane, input string trans_type);
+    bit [7:0]       last_state;
+    bit             is_rt;
+
+    if (!(trans_type inside { "rt", "at" } )) begin
+      `uvm_fatal({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): Illegal transaction type (%0s) specified.", trans_type))
+    end
+    is_rt = (trans_type == "rt" ? 1 : 0);
+    last_state = state;
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): Lane %0d - Start - state = %0d", lane, state), UVM_MEDIUM)
+    // Initial condition check
+    fork
+      begin
+        wait(pkt_event.triggered);
+        if ((trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ] != 1) && (trans.data[ lane + 2 ][ TXFFE_REQUEST_DONE_BIT ] != 0)) begin
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): FFE Initialization correct - Lane %0d - TX_ACTIVE == 1, REQUEST_DONE == 0", lane), UVM_MEDIUM)
+        end else begin
+          `uvm_error({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): Error in initial conditions - Lane %0d - TX_ACTIVE (%0d) != 1, REQUEST_DONE (%0d) != 0", lane, trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ], trans.data[ lane + 2 ][ TXFFE_REQUEST_DONE_BIT ]))
+        end
+      end
+    join_none
+    // FFE flow
+    fork begin : flow_protection
+      fork
+        begin
+          // RX_LOCK indicates FFE Done (the end of this flow)
+          ffe_watch_for_xxx(.lane(lane), .pkt_event(got_ls_tx_pkt_event[lane]), .byte_n(lane), .bit_n(TXFFE_RX_LOCKED_BIT), .val(1), .id("TX"), .ls_idx(0));
+          // End of flow checks
+          fork
+            //check_clock_switch_done(trans); // Still the same transaction
+            //check_for_resume_2();
+          join
+        end
+        begin
+          // TX_ACTIVE should remain set (sticky)
+          ffe_watch_bit(input int lane, input string id, input event pkt_event, input int bit_position, input string bit_name, input bit watch_val, input ls_idx = 0);
+          `uvm_error({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): Unexpectected bit clearing (should be sticky) - Lane %0d - TX_ACTIVE (%0d) != 1", lane, trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ]))
+        end
+        begin
+          // Loop until new request set
+          // Count number of new requests. When set, sample request val and cover
+          // Once new request is set, wait for new request to clear with a watchdog
+        end
+        begin
+        end
+        begin
+        end
+        begin
+        end
+      join_any
+      disable fork;
+    end join // block: flow_protection
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): Lane %0d -  Done - state = %0d", lane, last_state), UVM_MEDIUM)
+    #1; //for now
+  endtask : sym_tx_flow_fsm
+
+  //----------------------------------------------------------------------------------------------
+  /// sym_rx_rt_flow_fsm
+  /// This task is a simple wrapper that passes the correct transaction type to the sym_rx_flow_fsm() task
+  ///
+  task sym_rx_rt_flow_fsm(inout bit [7:0] state, output bit done, input bit lane);
+    sym_rx_flow_fsm(state, done, lane, "rt");
+  endtask : sym_rx_rt_flow_fsm
+
+  //----------------------------------------------------------------------------------------------
+  /// sym_rx_at_flow_fsm
+  /// This task is a simple wrapper that passes the correct transaction type to the sym_rx_flow_fsm() task
+  ///
+  task sym_rx_at_flow_fsm(inout bit [7:0] state, output bit done, input bit lane);
+    sym_rx_flow_fsm(state, done, lane, "at");
+  endtask : sym_rx_at_flow_fsm
+
+  //----------------------------------------------------------------------------------------------
+  /// sym_rx_flow_fsm
+  /// This task will perform the symmetric receiver TxFFE flow check for non-Legacy units
+  ///
+  //------------------------------------------------------------------------------------------------
+  // FFE checks
+  //
+  // - SYM RX, RDs
+  // -4- tx active set - timeout & count (try) errors [step 2-3 loop]
+  // -6- request done set - timout & count (try) errors [step 6-7 loop] [step (9?) 10-11 loop]
+  // -5- tx active sticky set (clears) - this shouldn't happen (step 7 checks for tx active)
+  // -9- txffe setting =?= txffe request
+  // -7- request done clear/tx active sticky
+  //
+  task sym_rx_flow_fsm(inout bit [7:0] state, output bit done, input bit lane, input string trans_type);
+    bit [7:0]       last_state;
+    bit             is_rt;
+
+    if (!(trans_type inside { "rt", "at" } )) begin
+      `uvm_fatal({get_type_name(), " : FFE_CHK"}, $sformatf("sym_rx_flow_fsm_check(): Illegal transaction type (%0s) specified.", trans_type))
+    end
+    is_rt = (trans_type == "rt" ? 1 : 0);
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("sym_rx_flow_fsm_check(): Lane %0d - Start - state = %0d", lane, state), UVM_MEDIUM)
+    last_state = state;
+    // Initial condition check
+    fork
+      begin
+        wait(pkt_event.triggered);
+        if ((trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ] != 1) && (trans.data[ lane + 2 ][ TXFFE_REQUEST_DONE_BIT ] != 0)) begin
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): FFE Initialization correct - Lane %0d - TX_ACTIVE == 1, REQUEST_DONE == 0", lane), UVM_MEDIUM)
+        end else begin
+          `uvm_error({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): Error in initial conditions - Lane %0d - TX_ACTIVE (%0d) != 1, REQUEST_DONE (%0d) != 0", lane, trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ], trans.data[ lane + 2 ][ TXFFE_REQUEST_DONE_BIT ]))
+        end
+      end
+    join_none
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("sym_rx_flow_fsm_check(): Lane %0d -  Done - state = %0d", lane, last_state), UVM_MEDIUM)
+  endtask : sym_rx_flow_fsm
+
+  //----------------------------------------------------------------------------------------------
+  /// asym_tx_primary_flow_fsm
+  /// This task will perform the asymmetric transmitting primary partner TxFFE flow check for some Legacy units
+  ///
+  //------------------------------------------------------------------------------------------------
+  // FFE checks
+  //
+  // - ASYM TX PRI, WRs/RDs
+  // -1- rx lock set [x]
+  // -2- new request clear to set [x] [step 3-4 loop]
+  // -3- new request set to clear polling [step 7-8 loop]
+  //
+  task asym_tx_primary_flow_fsm(inout bit [7:0] state, output bit done, input bit lane);
+    bit [7:0]               last_state;
+
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("asym_tx_primary_flow_fsm_check(): Lane %0d - Start - state = %0d", lane, state), UVM_MEDIUM)
+    last_state = state;
+    // Initial condition check
+    fork
+      begin
+        wait(pkt_event.triggered);
+        if ((trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ] != 1) && (trans.data[ lane + 2 ][ TXFFE_REQUEST_DONE_BIT ] != 0)) begin
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): FFE Initialization correct - Lane %0d - TX_ACTIVE == 1, REQUEST_DONE == 0", lane), UVM_MEDIUM)
+        end else begin
+          `uvm_error({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): Error in initial conditions - Lane %0d - TX_ACTIVE (%0d) != 1, REQUEST_DONE (%0d) != 0", lane, trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ], trans.data[ lane + 2 ][ TXFFE_REQUEST_DONE_BIT ]))
+        end
+      end
+    join_none
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("asym_tx_primary_flow_fsm_check(): Lane %0d - Done  - state = %0d", lane, last_state), UVM_MEDIUM)
+  endtask : asym_tx_primary_flow_fsm
+
+  //----------------------------------------------------------------------------------------------
+  /// asym_rx_primary_flow_fsm
+  /// This task will perform the asymmetric receiver TxFFE flow check for some Legacy units
+  ///
+  //------------------------------------------------------------------------------------------------
+  // FFE checks
+  //
+  // - ASYM RX PRI, RDs/WRs
+  // -4,10- tx active set -> rx active set
+  // -4- tx active set [step 2-21 loop]
+  // -1- rx lock set [x]
+  // -5- tx active set sticky
+  // -8- rx active set sticky
+  // -6- request done set
+  // -9- setting =?= request [step 9-10 loop]
+  // -5- tx active set && request done clear [step 13-14 loop]
+  //
+  task asym_rx_primary_flow_fsm(inout bit [7:0] state, output bit done, input bit lane);
+    bit [7:0]               last_state;
+
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("asym_rx_primary_flow_fsm_check(): Lane %0d - Start - state = %0d", lane, state), UVM_MEDIUM)
+    last_state = state;
+    // Initial condition check
+    fork
+      begin
+        wait(pkt_event.triggered);
+        if ((trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ] != 1) && (trans.data[ lane + 2 ][ TXFFE_REQUEST_DONE_BIT ] != 0)) begin
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): FFE Initialization correct - Lane %0d - TX_ACTIVE == 1, REQUEST_DONE == 0", lane), UVM_MEDIUM)
+        end else begin
+          `uvm_error({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): Error in initial conditions - Lane %0d - TX_ACTIVE (%0d) != 1, REQUEST_DONE (%0d) != 0", lane, trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ], trans.data[ lane + 2 ][ TXFFE_REQUEST_DONE_BIT ]))
+        end
+      end
+    join_none
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("asym_rx_primary_flow_fsm_check(): Lane %0d -  Done - state = %0d", lane, last_state), UVM_MEDIUM)
+  endtask : asym_rx_primary_flow_fsm
+
+  //----------------------------------------------------------------------------------------------
+  /// asym_tx_subordinate_flow_fsm
+  /// This task will perform the Retimer asymmetric transmitter TxFFE flow check for some Legacy units
+  ///
+  //------------------------------------------------------------------------------------------------
+  // FFE checks
+  //
+  // - ASYM TX SUB --> wait for write
+  // -1- rx locked set [x]
+  // -2- new request set [step 2 loop]
+  // -3&&1-!- new request clear and rx lock set (redmine #9036)
+  // -3- new request clear [step 5 loop]
+  //
+  virtual task asym_tx_subordinate_flow_fsm(inout bit [7:0] state, output bit done, input bit lane);
+    bit [7:0]               last_state;
+
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("asym_tx_subordinate_flow_fsm_check(): Lane %0d - Start - state = %0d", lane, state), UVM_MEDIUM)
+    last_state = state;
+    // Initial condition check
+    fork
+      begin
+        wait(pkt_event.triggered);
+        if ((trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ] != 1) && (trans.data[ lane + 2 ][ TXFFE_REQUEST_DONE_BIT ] != 0)) begin
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): FFE Initialization correct - Lane %0d - TX_ACTIVE == 1, REQUEST_DONE == 0", lane), UVM_MEDIUM)
+        end else begin
+          `uvm_error({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): Error in initial conditions - Lane %0d - TX_ACTIVE (%0d) != 1, REQUEST_DONE (%0d) != 0", lane, trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ], trans.data[ lane + 2 ][ TXFFE_REQUEST_DONE_BIT ]))
+        end
+      end
+    join_none
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("asym_tx_subordinate_flow_fsm_check(): Lane %0d - Done  - state = %0d", lane, last_state), UVM_MEDIUM)
+  endtask : asym_tx_subordinate_flow_fsm
+
+  //----------------------------------------------------------------------------------------------
+  /// asym_rx_subordinate_flow_fsm
+  /// This task will perform the Retimer asymmetric receiver TxFFE flow check for some Legacy units
+  ///
+  //------------------------------------------------------------------------------------------------
+  // FFE checks
+  //
+  // - ASYM RX SUB --> wait for write
+  // -4- tx active set [step 2 loop]
+  // -1- rx lock set
+  // -5- tx active set sticky
+  // -6- request done set && setting == request [step 5 loop]
+  // -7- request done clear [step 8 loop]
+  //
+  task asym_rx_subordinate_flow_fsm(inout bit [7:0] state, output bit done, input bit lane);
+    bit [7:0]               last_state;
+
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("asym_rx_subordinate_flow_fsm_check(): Lane %0d - Start - state = %0d", lane, state), UVM_MEDIUM)
+    last_state = state;
+    // Initial condition check
+    fork
+      begin
+        wait(pkt_event.triggered);
+        if ((trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ] != 1) && (trans.data[ lane + 2 ][ TXFFE_REQUEST_DONE_BIT ] != 0)) begin
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): FFE Initialization correct - Lane %0d - TX_ACTIVE == 1, REQUEST_DONE == 0", lane), UVM_MEDIUM)
+        end else begin
+          `uvm_error({get_type_name(), " : FFE_CHK"}, $sformatf("sym_tx_flow_fsm_check(): Error in initial conditions - Lane %0d - TX_ACTIVE (%0d) != 1, REQUEST_DONE (%0d) != 0", lane, trans.data[ lane + 2 ][ TXFFE_TX_ACTIVE_BIT ], trans.data[ lane + 2 ][ TXFFE_REQUEST_DONE_BIT ]))
+        end
+      end
+    join_none
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("asym_rx_subordinate_flow_fsm_check(): Lane %0d -  Done - state = %0d", lane, last_state), UVM_MEDIUM)
+  endtask : asym_rx_subordinate_flow_fsm
+
+  //------------------------------------------------------------------------------------------------
+  /// Check LS TX packets that target the TXFFE register
+  virtual task process_tx_commands(input int ls_lane);
+    cio_ls_sequence_item_base tx_trans;
+    cio_rt_sequence_item_base ls_rt;
+    cio_at_sequence_item_base ls_at;
+    string pkt_str;
+    bit    cmd_rsp_n;
+
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("process_tx_commands: Starting process_tx_commands() for Ls_lane %0d. env_cfg.ls_response_check_enable =%0d, env_cfg.enable_checks = %0d", ls_lane, env_cfg.ls_response_check_enable, env_cfg.enable_checks), UVM_HIGH)
+    forever begin
+      pkt_str = "XXX";
+      cmd_rsp_n = 'bX;
+      ls_tx_fifo[ls_lane].get(tx_trans);
+      `uvm_info({get_type_name(), " : FFE_CHK"}, {"process_tx_commands: LS Tx transaction\n", tx_trans.sprint()}, UVM_HIGH)
+      // Watch for LT_Fall, since we need to know when that happens
+      if (tx_trans.trans_type == LT_TRANS) begin
+        //if ((tx_trans.lse_symbol.name() == "LT_Resume") /*|| (tx_trans.lse_symbol.name() == "LT_Gen_2") || (tx_trans.lse_symbol.name() == "LT_Gen_3") || (tx_trans.lse_symbol.name() == "LT_Fall")*/) begin
+        if ((tx_trans.lse_symbol.name() == "LT_Resume") ) begin
+          //`uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("process_tx_commands: Found an LT_Resume, LT_Fall, LT_Gen_2, or LT_Gen_3 for HS lane %0d!", tx_trans.lse_lane), UVM_LOW)
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("process_tx_commands: Found an LT_Resume for HS lane %0d!", tx_trans.lse_lane), UVM_LOW)
+          ->got_lt_resume_event[tx_trans.lse_lane];
+          continue;
+        end
+        if ((tx_trans.lse_symbol.name() == "LT_Resume_2") ) begin
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("process_tx_commands: Found an LT_Resume_2 for HS lane %0d!", tx_trans.lse_lane), UVM_LOW)
+          ->got_lt_resume_2_event[tx_trans.lse_lane];
+          continue;
+        end
+      end
+      if (tx_trans.trans_type == RT_TRANS) begin
+        if ($cast(ls_rt, tx_trans)) begin
+          pkt_str = "RT";
+          cmd_rsp_n = ls_rt.cmd_not_resp;
+          if ((ls_rt.cmd_not_resp) && (ls_rt.rt_cmd_type == RT_Broadcast)) begin
+            `uvm_info({get_type_name(), " : FFE_CHK"}, "process_tx_commands: This is an RT Broadcast command transaction", UVM_MEDIUM)
+            continue;
+          end
+        end
+      end
+      // Drop all packets that aren't TXFFE register accesses
+      if (tx_trans.data_reg == TXFFE_REG_NUM) begin
+        if ($cast(ls_at, tx_trans)) begin
+          pkt_str = "AT";
+          cmd_rsp_n = ls_at.cmd_not_resp;
+        end else if ($cast(ls_rt, tx_trans)) begin
+          pkt_str = "RT";
+          cmd_rsp_n = ls_rt.cmd_not_resp;
+        end else begin
+          pkt_str = "UNK";
+          cmd_rsp_n = 1'bZ;
+        end
+
+        `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("process_tx_commands: Found TXFFE LS transaction (%0s %0s)", pkt_str, ((cmd_rsp_n == 1'b1) ? "CMD" : "RSP")), UVM_MEDIUM)
+        ls_tx_pkt[ls_lane] = tx_trans;
+        ->got_ls_tx_pkt_event[ls_lane];
+      end else begin
+        `uvm_info({get_type_name(), " : FFE_CHK"}, "process_tx_commands: Dropping LS transaction", UVM_DEBUG)
+      end
+    end
+  endtask : process_tx_commands
+
+  //------------------------------------------------------------------------------------------------
+  /// Check LS RX packets that target the TXFFE register
+  virtual task process_rx_commands(input int ls_lane);
+    cio_ls_sequence_item_base rx_trans;
+    cio_rt_sequence_item_base ls_rt;
+    cio_at_sequence_item_base ls_at;
+    string pkt_str;
+    bit    cmd_rsp_n;
+
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("process_rx_commands: Starting check_ls_response() for Ls_lane %0d. env_cfg.ls_response_check_enable =%0d, env_cfg.enable_checks = %0d", ls_lane, env_cfg.ls_response_check_enable, env_cfg.enable_checks), UVM_HIGH)
+    forever begin
+      pkt_str = "XXX";
+      cmd_rsp_n = 'bX;
+      ls_rx_fifo[ls_lane].get(rx_trans);
+      `uvm_info({get_type_name(), " : FFE_CHK"}, {"process_rx_commands: LS Rx transaction\n", rx_trans.sprint()}, UVM_HIGH)
+      // Watch for LT_Fall, since we need to know when that happens
+      if (rx_trans.trans_type == LT_TRANS) begin
+        if ((rx_trans.lse_symbol.name() == "LT_Resume") ) begin
+          `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("process_rx_commands: Found an LT_Resume for HS lane %0d!", rx_trans.lse_lane), UVM_LOW)
+          continue;
+        end
+      end
+      if (rx_trans.trans_type == RT_TRANS) begin
+        if ($cast(ls_rt, rx_trans)) begin
+          pkt_str = "RT";
+          cmd_rsp_n = ls_rt.cmd_not_resp;
+          if ((ls_rt.cmd_not_resp) && (ls_rt.rt_cmd_type == RT_Broadcast)) begin
+            `uvm_info({get_type_name(), " : FFE_CHK"}, "process_rx_commands: This is an RT Broadcast command transaction", UVM_MEDIUM)
+            continue;
+          end
+        end
+      end
+      // Drop all packets that aren't TXFFE register accesses
+      if (rx_trans.data_reg == TXFFE_REG_NUM) begin
+        if ($cast(ls_at, rx_trans)) begin
+          pkt_str = "AT";
+          cmd_rsp_n = ls_at.cmd_not_resp;
+        end else if ($cast(ls_rt, rx_trans)) begin
+          pkt_str = "RT";
+          cmd_rsp_n = ls_rt.cmd_not_resp;
+        end else begin
+          pkt_str = "UNK";
+          cmd_rsp_n = 1'bZ;
+        end
+
+        `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("process_rx_commands: Found TXFFE LS transaction (%0s %0s)", pkt_str, ((cmd_rsp_n == 1'b1) ? "CMD" : "RSP")), UVM_MEDIUM)
+        ls_rx_pkt[ls_lane] = rx_trans;
+        ->got_ls_rx_pkt_event[ls_lane];
+      end else begin
+        `uvm_info({get_type_name(), " : FFE_CHK"}, "process_rx_commands: Dropping ls transaction", UVM_DEBUG)
+      end
+    end
+  endtask : process_rx_commands
+
+//rm  //------------------------------------------------------------------------------------------------
+//rm  /// Master Low Speed transaction protocol check function
+//rm  /// This function calls Low Speed protocol checks
+//rm  virtual function void check_ls_protocol(input int lane, input cio_ls_sequence_item_base rx_trans, input string id);
+//rm    cio_ls_sequence_item_base trans;
+//rm    //rx_trans.copy(trans);
+//rm    $cast(trans, rx_trans.clone());
+//rm    if (!env_cfg.enable_checks) begin
+//rm      `uvm_warning({get_type_name(), " : FFE_CHK"}, $sformatf("CHECK: [Lane %0d %0s] Global env_cfg.enable_checks (= %0d) is disabled", lane, id, env_cfg.enable_checks));
+//rm    end else begin
+//rm      call_ls_checks(lane, trans, id);
+//rm    end
+//rm  endfunction : check_ls_protocol
+//rm
+//rm  //------------------------------------------------------------------------------------------------
+//rm  /// Low Speed check call aggregator
+//rm  /// This function calls all other Low Speed protocol checks
+//rm  virtual function void call_ls_checks(input int lane, input cio_ls_sequence_item_base rx_trans, input string id);
+//rm    //ls_crc_chk(lane, rx_trans, id);
+//rm//    ls_lt_resume_2_lane_chk(lane, rx_trans, id); //FIXME: call when an FFE lane is finished, not every trans
+//rm//    ls_xxx_chk(lane, rx_trans, id);
+//rm  endfunction : call_ls_checks
+
+
+  //------------------------------------------------------------------------------------------------
+  // FFE checks
+  //
+  // - SYM TX, RDs
+  // -1- rx locked set, if locked, start clock switch done (with current RSP) and lt resume 2 checks as needed
+  // -2- new request set; count number of new requests
+  // -3- new request clear -> polling - timeout & count (try) errors [step 2-3 loop]
+  // ---- timeout value could be (N * t_poll_max) + M
+  // ---- if new request, sample txffe_setting value & cover
+  // -3- new request clear, if new request - timeout & count (try) errors [step 5-6 loop]
+  //
+  // - SYM RX, RDs
+  // -4- tx active set - timeout & count (try) errors [step 2-3 loop]
+  // -6- request done set - timout & count (try) errors [step 6-7 loop] [step (9?) 10-11 loop]
+  // -5- tx active sticky set (clears) - this shouldn't happen (step 7 checks for tx active)
+  // -9- txffe setting =?= txffe request
+  // -7- request done clear/tx active sticky
+  //
+  // - ASYM TX PRI, WRs/RDs
+  // -1- rx lock set [x]
+  // -2- new request clear to set [x] [step 3-4 loop]
+  // -3- new request set to clear polling [step 7-8 loop]
+  //
+  // - ASYM RX PRI, RDs/WRs
+  // -4,10- tx active set -> rx active set
+  // -4- tx active set [step 2-21 loop]
+  // -1- rx lock set [x]
+  // -5- tx active set sticky
+  // -8- rx active set sticky
+  // -6- request done set
+  // -9- setting =?= request [step 9-10 loop]
+  // -5- tx active set && request done clear [step 13-14 loop]
+  //
+  // - ASYM TX SUB --> wait for write
+  // -1- rx locked set [x]
+  // -2- new request set [step 2 loop]
+  // -3&&1-!- new request clear and rx lock set (redmine #9036)
+  // -3- new request clear [step 5 loop]
+  //
+  // - ASYM RX SUB --> wait for write
+  // -4- tx active set [step 2 loop]
+  // -1- rx lock set
+  // -5- tx active set sticky
+  // -6- request done set && setting == request [step 5 loop]
+  // -7- request done clear [step 8 loop]
+  //
+  // - GENERAL
+  // -? tTrainingError, tTrainingAbortX checks? i.e. overall timeout
+  // -? Should SET_PARTNER_TXFFE be a monitor task to auto-update storage (for PASSIVE compatibility)?
+  //------------------------------------------------------------------------------------------------
+
+
+  /*//------------------------------------------------------------------------------------------------
+  PROCESS
+    One TX flow and one RX flow process will be started per VIP, corresponding to it's chosen flow choice
+    - rx lock set completing indicates done-ness. This can also mark an end/total time. An FFE max time watchdog can be applied
+    - Once detected (tx active, rx active), a sticky loop will be started
+    - Polling loops will have three threads in a fork-join_any: N tries, watchdog timer, and condition detected (passing/good case)
+    - Some loops will spawn new loops e.g. once new request is set (loop) then the loop watching for new request clear is started
+    - ALL methods will be labelled with a current Base or Retimer spec version to allow backwards compatibility (KB MH B0 FFE flow changes, etc.)
+    - Q: Do the three thread forks need a fourth thread that allows a user (or set_type_override) to kill a check manually?
+    - Q: How can this process be extended for special circumstances in an override?
+         ? Could an additional thread call an empty (base) method to allow override hooks?
+    - EACH monitor/check process will need a unique enable bit
+    - Q: Can a generic method/process be created that allows expressions to be passed in?
+  //------------------------------------------------------------------------------------------------*/
+
+
+  //------------------------------------------------------------------------------------------------
+  /// FFE custom hook task used by the ffe_watch_for_xxx task
+  ///
+  virtual task ffe_watch_for_xxx_hook(input int lane, input event pkt_event, input string id, output bit pass);
+    pass = 0;
+    while (1) begin
+      wait(pkt_event.triggered); // < Custom detecton or condition code replaces this line >
+    end
+  endtask : ffe_watch_for_xxx_hook
+
+  //------------------------------------------------------------------------------------------------
+  /// FFE task that watches for XXX
+  ///
+  virtual task ffe_watch_for_xxx(input int lane, input event pkt_event, input int byte_n, input int bit_n, input bit val, input string id, input int ls_idx = 0);
+    bit   pass = 0;
+    int   num_tries = 0;
+    int   ffe_watch_for_xxx_timeout = 1000; // FIXME: move into cfg
+    int   ffe_watch_for_xxx_tries = 10; // FIXME: move into cfg
+    int   thread_id;
+    cio_ls_sequence_item_base trans;
+
+    if (id == "TX") begin
+      trans = ls_tx_pkt[ls_idx];
+    end else if (id == "RX") begin
+      trans = ls_rx_pkt[ls_idx];
+    end else begin
+      `uvm_fatal({get_type_name(), " : FFE_CHK"}, $sformatf("ffe_watch_for_xxx(): Illegal ID string = %0s", id))
+    end
+
+    if (!ffe_watch_for_xxx_en) begin
+      `uvm_warning({get_type_name(), " : FFE_CHK"}, $sformatf("CHECK: [Lane %0d %0s] ffe_watch_for_xxx (= %0d) is disabled", lane, id, ffe_watch_for_xxx_en))
+    end else begin
+      fork begin : protection
+        fork
+          begin
+            while (1) begin
+              // Stimulus change to value detected thread
+              wait(pkt_event.triggered);
+//FIXME: add//              if (disable_xxx_thread) continue; // loop forever. exit will now be due to watch hook, timeout, or tries
+              // < watch/check goes here >
+              if (trans.data[ byte_n ][ bit_n ] == val) begin
+                `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("Saw data on %0slane %0d", id, lane), UVM_MEDIUM)
+                thread_id = 1;
+                break;
+              end              `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("Saw data on %0slane %0d", id, lane), UVM_MEDIUM)
+            end
+          end
+          begin
+            // Watchdog timeout thread
+//            ffe_watch_for_xxx_timeout = timing_cfg.ffe_watch_for_xxx_timeout;
+            #(ffe_watch_for_xxx_timeout * 1.0us);
+            `uvm_error({get_type_name(), " : FFE_CHK"}, $sformatf("Timeout waiting for XXX to be <set/cleared> for %0slane %0d", id, lane))
+            thread_id = 2;
+          end
+          begin
+            // N tries exceeded thread
+//            ffe_watch_for_xxx_tries = timing_cfg.ffe_watch_for_xxx_tries;
+            while (1) begin
+              wait(pkt_event.triggered);
+              num_tries++;
+              if (num_tries > ffe_watch_for_xxx_tries) begin
+                pass = 0;
+                thread_id = 3;
+                break;
+              end
+            end
+          end
+          begin
+            // Custom hook
+            bit pass_return = 0;
+            ffe_watch_for_xxx_hook(lane, pkt_event, id, pass_return);
+            if (pass_return == 1) begin
+              pass = pass_return;
+            end
+            thread_id = 4;
+          end
+        join_any
+        disable fork;
+      end join // protection
+      pass = 1;
+      `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("CHECK: [Lane %0d %0s] Completed due to conditions in Thread ID #%0d", lane, id, thread_id), UVM_LOW)
+      if (pass) begin
+        `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("CHECK: [Lane %0d %0s] Transaction xxx check: %0s", lane, id, (pass ? "PASSED" : "FAILED")), UVM_LOW)
+      end else begin
+        `uvm_error({get_type_name(), " : FFE_CHK"}, $sformatf("CHECK: [Lane %0d %0s] Transaction xxx check: %0s", lane, id, (pass ? "PASSED" : "FAILED")))
+      end
+      ls_xxx_chk_count++;
+    end
+  endtask : ffe_watch_for_xxx
+
+  //------------------------------------------------------------------------------------------------
+  /// FFE task that watches for txffe request to equal txffe setting
+  ///
+  virtual task ffe_watch_request_setting(input int lane, input string id, input event pkt_event, input ls_idx = 0);
+    cio_ls_sequence_item_base trans;
+
+    if (id == "TX") begin
+      trans = ls_tx_pkt[ls_idx];
+    end else if (id == "RX") begin
+      trans = ls_rx_pkt[ls_idx];
+    end else begin
+      `uvm_fatal({get_type_name(), " : FFE_CHK"}, $sformatf("ffe_watch_request_setting(): Illegal ID string = %0s", id))
+    end
+
+    while (1) begin
+      wait(pkt_event.triggered);
+      if (trans.data[ lane + 2 ][ `TXFFE_SETTING_BITS ] == trans.data[ lane + 2 ][ `TXFFE_REQUEST_BITS ]) begin
+        `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("Saw request == setting on %0slane %0d", id, lane), UVM_MEDIUM)
+        break;
+      end else begin
+        `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("Saw request != setting on %0slane %0d", id, lane), UVM_MEDIUM)
+      end
+    end
+  endtask : ffe_watch_request_setting
+
+  //------------------------------------------------------------------------------------------------
+  /// FFE task that watches for a given bit to take a requested value
+  /// This is a generic helper task
+  virtual task ffe_watch_bit(input int lane, input string id, input event pkt_event, input int bit_position, input string bit_name, input bit watch_val, input ls_idx = 0);
+    cio_ls_sequence_item_base trans;
+
+    if (id == "TX") begin
+      trans = ls_tx_pkt[ls_idx];
+    end else if (id == "RX") begin
+      trans = ls_rx_pkt[ls_idx];
+    end else begin
+      `uvm_fatal({get_type_name(), " : FFE_CHK"}, $sformatf("ffe_watch_request_setting(): Illegal ID string = %0s", id))
+    end
+
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("WATCH: [Lane %0d %0s] Start - watch for %0s (bit %0d) to have value 0b%0b", lane, id, bit_name, bit_position, watch_val), UVM_LOW)
+    do begin
+      wait(pkt_event.triggered);
+      if (trans.data[ lane ][ bit_position ] == watch_val) begin
+        `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("Saw data[%0d][%0d] (%0s) == watch_val on %0slane %0d", lane, bit_position, bit_name, id, lane), UVM_MEDIUM)
+        break;
+      end else begin
+        `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("Saw data[%0d][%0d] (%0s) != watch_val on %0slane %0d", lane, bit_position, bit_name, id, lane), UVM_MEDIUM)
+      end
+    end while(1);
+    `uvm_info({get_type_name(), " : FFE_CHK"}, $sformatf("WATCH: [Lane %0d %0s]  Done - watch for %0s (bit %0d) to have value 0b%0b", lane, id, bit_name, bit_position, watch_val), UVM_LOW)
+  endtask : ffe_watch_bit
+
+endclass : cio_ffe_protocol_checker
+`endif // __CIO_FFE_PROTOCOL_CHECKER_SV__

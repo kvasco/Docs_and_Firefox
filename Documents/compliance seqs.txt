@@ -1,0 +1,234 @@
+//-------------------------------------------------------------------------------------------------
+/// @class prbs_pattern_seq
+/// Prbs_pattern sequence
+class prbs_pattern_seq extends cio_hs_base_seq;
+
+  cio_compliance_pattern_hs_sequence_item  prbs_symbol;
+  // Sequence fields
+  rand int os_num;
+  // Seq item fields
+  rand bit             keep_repeating; ///< Repeat this word (usually adata word) if a new one is not available to the driver.
+
+  rand bit        framed_or_raw; ///< 1 -> framed (bit swap, scrambling, etc.)
+                                 ///< 0 -> raw - no framing, goes directly to HS wire
+  rand cio_compliance_pattern_t pattern;
+
+  rand bit [63:0] prev_prbs64;
+
+       bit [63:0] curr_prbs64[2];
+
+       bit [127:0] prbs_data;
+
+       int        prbs_length;
+
+  `uvm_object_utils_begin(prbs_pattern_seq)
+    `uvm_field_int       (os_num,       UVM_DEFAULT)
+    `uvm_field_int       (keep_repeating,  UVM_DEFAULT)
+    `uvm_field_int       (framed_or_raw,   UVM_DEFAULT)
+    `uvm_field_enum      (cio_compliance_pattern_t, pattern, UVM_DEFAULT)
+    `uvm_field_int       (prev_prbs64,  UVM_DEFAULT)
+    `uvm_field_sarray_int(curr_prbs64,  UVM_DEFAULT)
+    `uvm_field_int       (prbs_data,    UVM_DEFAULT)
+    `uvm_field_int       (prbs_length,  UVM_DEFAULT)
+  `uvm_object_utils_end
+
+  constraint os_num_c {
+    soft os_num <= 500_000;// 10_000;
+    os_num > 0;
+  }
+
+  constraint repeating_c {
+    soft keep_repeating == 0;
+  }
+
+  constraint framed_c {
+    soft framed_or_raw == 1;
+  }
+  constraint pattern_c {
+    pattern inside {PRBS31,PRBS15,PRBS9,PRBS7};
+  }
+  constraint init_prbs_c {
+    soft prev_prbs64 == 1;
+  }
+
+  //----------------------------------------------------------------------------------------------
+  /// Constructor
+  function new(string name = "prbs_pattern_seq");
+    super.new(name);
+  endfunction
+
+  /// Sequence body definition
+  virtual task body();
+    prbs_length = pattern == PRBS31 ? 31 :
+                  pattern == PRBS15 ? 15 :
+                  pattern == PRBS9  ?  9 : 7;
+
+    `uvm_info(get_name(), $sformatf("Sending %0d PRBS%0d_PATTERN %0s %0spackets", os_num, prbs_length, p_sequencer.env_cfg.phase3_decision.link_speed.name(), p_sequencer.env_cfg.phase3_decision.fec_enabled ? "FEC ":""), UVM_MEDIUM)
+
+    for (int index = 0; index < os_num; index++) begin
+      curr_prbs64[0] = 64'hf8ed_2ea7_dead_beef;
+      curr_prbs64[1] = 64'hf8ed_2ea7_dead_beef;
+      for (int num_qw = 0; num_qw < (p_sequencer.env_cfg.phase3_decision.link_speed == GEN3 ? 2 : 1); num_qw++) begin
+
+        prbs_data = cio_pkg::prbs_gen_64(prbs_length, prev_prbs64);
+        curr_prbs64[num_qw] = prbs_data[63:0];
+        prev_prbs64 = curr_prbs64[num_qw];
+      end
+
+      `uvm_info(get_name(), $sformatf("Sending %0d/%0d PRBS%0d_PATTERN packet", index + 1, os_num, prbs_length), UVM_FULL)
+      if (p_sequencer.env_cfg.phase3_decision.link_speed == GEN3) begin
+        `uvm_do_with(prbs_symbol, {
+          qwords[0]           == curr_prbs64[0];
+          qwords[1]           == curr_prbs64[1];
+          keep_repeating      == local::keep_repeating;
+          link_speed          == p_sequencer.env_cfg.phase3_decision.link_speed;
+          framed_or_raw       == local::framed_or_raw;
+          pattern             == local::pattern;
+        });
+      end else begin
+        `uvm_do_with(prbs_symbol, {
+          qwords[0]           == curr_prbs64[0];
+          keep_repeating      == local::keep_repeating;
+          link_speed          == p_sequencer.env_cfg.phase3_decision.link_speed;
+          framed_or_raw       == local::framed_or_raw;
+          pattern             == local::pattern;
+        });
+      end
+      `uvm_info(get_name(), $sformatf("Sent single PRBS%0d_WAVE_PATTERN. prbs value = 0x%16h_%16h", prbs_length, curr_prbs64[0], curr_prbs64[1]), UVM_FULL)
+    end
+    `uvm_info(get_name(), $sformatf("Done sending %0d PRBS%0d_WAVE_PATTERN packets", os_num, prbs_length), UVM_MEDIUM)
+  endtask : body
+
+endclass : prbs_pattern_seq
+
+//-------------------------------------------------------------------------------------------------
+/// @class single_lane_compliance_pattern
+/// Sends the specified compliance pattern
+class single_lane_compliance_pattern extends cio_virtual_sequence_base;
+
+  prbs_pattern_seq        prbs_seq;
+  square_wave_pattern_seq sq_seq;
+  slos1_pattern_seq       slos1_seq;
+
+  rand int m_hs_lane; ///< HS lane to start on
+  // Sequence fields
+  rand int os_num;
+  // Seq item fields
+  rand bit keep_repeating; ///< Repeat this word (usually adata word) if a new one is not available to the driver.
+
+  rand bit framed_or_raw; ///< 1 -> framed (bit swap, scrambling, etc.)
+                          ///< 0 -> raw - no framing, goes directly to HS wire
+  rand cio_compliance_pattern_t pattern;
+
+  `uvm_object_utils(single_lane_compliance_pattern)
+  `uvm_declare_p_sequencer(cio_virtual_sqr)
+
+  constraint num_lanes_c {
+    m_hs_lane >= 0;
+    m_hs_lane < mh16_param_pkg::CIO_NUM_HS_LANES;
+  }
+  constraint os_num_c {
+    soft os_num <= 500_000;// 10_000;
+    os_num > 0;
+  }
+
+  constraint repeating_c {
+    soft keep_repeating == 0;
+  }
+
+  constraint framed_c {
+    soft framed_or_raw == 1;
+  }
+
+  /// Constructor
+  function new(string name="single_lane_compliance_pattern");
+    super.new(name);
+  endfunction
+
+  /// Sequence body definition
+  virtual task body();
+    super.body();
+
+    case (pattern)
+      SQ2, SQ4, SQ32, SQ128 : begin
+        `uvm_do_on_with(sq_seq, hs_sqr[m_hs_lane], { os_num == local::os_num; pattern == local::pattern; keep_repeating == local::keep_repeating; framed_or_raw == local::framed_or_raw; })
+      end
+      PRBS7, PRBS9, PRBS15, PRBS31 : begin
+        `uvm_do_on_with(prbs_seq, hs_sqr[m_hs_lane], { os_num == local::os_num; pattern == local::pattern; keep_repeating == local::keep_repeating; framed_or_raw == local::framed_or_raw; })
+      end
+      SLOS1_pattern : begin
+        `uvm_do_on_with(slos1_seq, hs_sqr[m_hs_lane], { os_num == local::os_num; })
+      end
+      default : begin
+        `uvm_fatal(get_name(), $sformatf("Pattern %0s (%0d) doesn't exist or is Not Yet Supported!", pattern.name(), pattern))
+      end
+    endcase // case (pattern)
+  endtask : body
+
+endclass : single_lane_compliance_pattern
+
+//-------------------------------------------------------------------------------------------------
+/// @class send_compliance_pattern
+/// Sends the specified compliance pattern
+class send_compliance_pattern extends cio_virtual_sequence_base;
+  single_lane_compliance_pattern pattern0;
+  single_lane_compliance_pattern pattern1;
+
+  // Sequence fields
+  rand int os_num;
+  // Seq item fields
+  rand bit keep_repeating; ///< Repeat this word (usually adata word) if a new one is not available to the driver.
+
+  rand bit framed_or_raw; ///< 1 -> framed (bit swap, scrambling, etc.)
+                          ///< 0 -> raw - no framing, goes directly to HS wire
+
+  rand bit lane_num;      ///Lane number. To enable only a single lane or both if needed.
+                          /// 0 = lane0, 1 = lane1, 2 = lane0+lane1 (default)
+  rand cio_compliance_pattern_t pattern;
+
+  `uvm_object_utils(send_compliance_pattern)
+  `uvm_declare_p_sequencer(cio_virtual_sqr)
+
+  constraint os_num_c {
+    soft os_num <= 500_000;// 10_000;
+    os_num > 0;
+  }
+
+  constraint repeating_c {
+    soft keep_repeating == 0;
+  }
+
+  constraint framed_c {
+    soft framed_or_raw == 1;
+  }
+
+  constraint lane_num_c {
+    soft lane_num == 2;
+  }
+
+  /// Constructor
+  function new(string name="send_compliance_pattern");
+    super.new(name);
+  endfunction
+
+  /// Sequence body definition
+  virtual task body();
+    super.body();
+
+    fork
+      if (p_sequencer.env_cfg.phase3_decision.lane0_enabled && (lane_num == 0 || lane_num == 2)) begin
+        `uvm_do_on_with(pattern0, v_sqr, { m_hs_lane == 0; os_num == local::os_num; pattern == local::pattern; keep_repeating == local::keep_repeating; framed_or_raw == local::framed_or_raw; })
+      end else begin
+        `uvm_info(get_name(), "Lane0 disabled, no pattern data", UVM_MEDIUM)
+      end
+
+      if (p_sequencer.env_cfg.phase3_decision.lane1_enabled && (lane_num == 1 || lane_num == 2)) begin
+        `uvm_do_on_with(pattern1, v_sqr, { m_hs_lane == 1; os_num == local::os_num; pattern == local::pattern; keep_repeating == local::keep_repeating; framed_or_raw == local::framed_or_raw; })
+      end else begin
+        `uvm_info(get_name(), "Lane1 disabled, no pattern data", UVM_MEDIUM)
+      end
+    join
+  endtask : body
+
+endclass : send_compliance_pattern
+

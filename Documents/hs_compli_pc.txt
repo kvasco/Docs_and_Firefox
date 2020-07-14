@@ -1,0 +1,150 @@
+  //------------------------------------------------------------------------------------------------
+  /// Check that the current pattern value is correct given the previous pattern value
+  virtual function void check_compliance_pattern(input cio_symbol_sequence_item prev_sym, input cio_symbol_sequence_item curr_sym, input string dir = "[rt]x");
+    bit    err_flag, lane, prbs_lock;
+    cio_compliance_pattern_t pattern, prev_pattern;
+    int    prbs_len;
+    bit [63:0] exp_prbs_data;
+
+    lane = lane_id[0];
+    dir = dir.tolower();
+    err_flag = 0;
+    `uvm_info("HS_PC::check_compliance_pattern()", $sformatf("Started"), UVM_DEBUG)
+    if (compliance_pattern_chk_en) begin
+      if ( !(dir inside {"rx", "tx"}) ) begin
+        `uvm_error("HS_PC::check_compliance_pattern_id()", $sformatf("Illegal direction string %0s", dir))
+      end
+      `uvm_info("HS_PC::check_compliance_pattern()", $sformatf(" pre-shift (prev <- curr): prev_pattern_%0s = %0d, pattern_%0s = %0d",
+                                               dir.tolower(), (dir == "rx" ? prev_pattern_rx :  dir == "tx" ? prev_pattern_tx : 1'dX),
+                                               dir.tolower(), (dir == "rx" ?      pattern_rx :  dir == "tx" ?      pattern_tx : 1'dX)), UVM_FULL)
+//wip//if (xxx_rx_prbs_lock) begin
+//wip//  exp_prbs_data = cio_pkg::prbs_gen_64(cio_pkg::prbs_len_cam[pattern], xxx_rx_prbs_chk_prev_qw);
+//wip//  xxx_rx_prbs_chk_prev_qw = exp_prbs_data;
+//wip//end else begin
+//wip//  xxx_rx_prbs_chk_prev_qw = curr_sym.qwords[0];
+//wip//end
+      if (dir == "rx") begin
+        prev_pattern_rx = pattern_rx;
+        prev_pattern = prev_pattern_rx;
+        pattern_rx = curr_sym.is_compliance_pattern(prev_sym.qwords[0]);
+        pattern = pattern_rx;
+        prbs_lock = rx_prbs_lock;
+      end else if (dir == "tx") begin
+        prev_pattern_tx = pattern_tx;
+        prev_pattern = prev_pattern_tx;
+        pattern_tx = curr_sym.is_compliance_pattern(prev_sym.qwords[0]);
+        pattern = pattern_tx;
+        prbs_lock = tx_prbs_lock;
+      end else begin
+        // noop - do nothing but bail
+        return;
+      end
+
+      // Check detected prbs_len matches programmed prbs len from LS COMPLI PC
+      check_compliance_pattern_id(.dir(dir), .pattern(pattern), .pattern_lock(prbs_lock));
+
+      `uvm_info("HS_PC::check_compliance_pattern()", $sformatf("post-shift (prev <- curr): prev_pattern_%0s = %0d, pattern_%0s = %0d", dir.tolower(), prev_pattern, dir.tolower(), pattern), UVM_FULL)
+      if ((curr_sym != null) && (prev_sym != null)) begin
+        `uvm_info("HS_PC::check_compliance_pattern()", $sformatf("%0s: prev_sym.qwords[0] = %16h, curr_sym.qwords[0] = %16h", dir.toupper(), prev_sym.qwords[0], curr_sym.qwords[0]), UVM_FULL)
+        `uvm_info("HS_PC::check_compliance_pattern()", $sformatf("%0s: prev_sym.is_prbs_start = %0d, curr_sym.is_prbs_start = %0d", dir.toupper(), prev_sym.is_prbs_start(), curr_sym.is_prbs_start()), UVM_FULL)
+        `uvm_info("HS_PC::check_compliance_pattern()", $sformatf("%0s: prev_sym.is_compliance_pattern = 0x%0h: %0s, curr_sym.is_compliance_pattern = 0x%0h: %0s", dir.toupper(), prev_pattern, prev_pattern.name(), pattern, pattern.name()), UVM_HIGH) //DEBUG)
+
+        if ((pattern != 'hC) || prbs_lock) begin
+          `uvm_info("HS_PC::check_compliance_pattern()", $sformatf("%0s: prev_sym = %0s, curr_sym = %0s", dir.toupper(), prev_sym.convert2string(), curr_sym.convert2string()), UVM_HIGH) //DEBUG)
+
+          prbs_len = cio_pkg::prbs_len_cam[pattern];
+
+//FIXME: add gen3 support
+          if (pattern inside {[PRBS31:PRBS7], 4'hC}) begin // PRBS pattern & unknown pattern code (error injection most likely)
+            if (dir == "rx") begin
+              void'(do_prbs_pattern_check(.dir(dir), .prev_qw(prev_sym.qwords[0]), .curr_qw(curr_sym.qwords[0]), .skip_first_chk_en(rx_compliance_pattern_skip_first_chk_en), .skip_chk_until_pass_en(rx_compliance_pattern_skip_chk_until_pass_en), .prbs_lock(rx_prbs_lock), .prbs_len(prbs_len)));
+            end else if (dir == "tx") begin //FIXME: create function for if(dir == [rt]x) content to compact this code and reduce redundnacy
+              void'(do_prbs_pattern_check(.dir(dir), .prev_qw(prev_sym.qwords[0]), .curr_qw(curr_sym.qwords[0]), .skip_first_chk_en(tx_compliance_pattern_skip_first_chk_en), .skip_chk_until_pass_en(tx_compliance_pattern_skip_chk_until_pass_en), .prbs_lock(tx_prbs_lock), .prbs_len(prbs_len)));
+            end else begin
+              `uvm_error("HS_PC::check_compliance_pattern()", $sformatf("Illegal direction string %0s", dir))
+            end
+//wip//   if (dir == "rx") begin
+//wip//   end else if (dir == "tx") begin
+//wip//   end else begin
+//wip//     // noop - do nothing
+//wip//   end
+//wip//if (xxx_rx_prbs_lock) begin
+//wip//  exp_prbs_data = cio_pkg::prbs_gen_64(cio_pkg::prbs_len_cam[pattern], xxx_rx_prbs_chk_prev_qw);
+//wip//  xxx_rx_prbs_chk_prev_qw = exp_prbs_data;
+//wip//end else begin
+//wip//  xxx_rx_prbs_chk_prev_qw = curr_sym.qwords[0];
+//wip//end
+          end else if (pattern inside {[SQ2:SQ128]}) begin // SQ pattern
+            `uvm_info("HS_PC::check_compliance_pattern()", $sformatf("%0s: %0s: CHECK %0s for prev_prbs = %16h   data_in = %16h", dir.toupper(), pattern.name(), "PASSED", prev_sym.qwords[0], curr_sym.qwords[0]), UVM_MEDIUM) //FIXME: qwords 1 & 0? or prev and curr
+          end else if (pattern == SLOS1_pattern) begin // SLOS1 pattern
+            integer /*bit [63:0]*/ curr_return_q[$];
+            integer /*bit [63:0]*/ prev_return_q[$];
+            curr_return_q = cio_pkg::SLOS1_VALUES.find_index() with (item == curr_sym.qwords[0]);
+            prev_return_q = cio_pkg::SLOS1_VALUES.find_index() with (item == prev_sym.qwords[0]);
+            if (prev_return_q.size() == 0) begin
+              err_flag = (curr_return_q.size() == 0); // this is the first compliance pattern
+            end else begin
+              err_flag = (cio_pkg::SLOS1_VALUES[((prev_return_q[0] + 1) % 32)] != cio_pkg::SLOS1_VALUES[curr_return_q[0]]);
+              if (err_flag) `uvm_error("HS_PC::check_compliance_pattern()", $sformatf("prev_return_q[0] = %0d, curr_return_q[0] = %0d, cio_pkg::SLOS1_VALUES[%0d] (0x%16h) != (0x%16h) cio_pkg::SLOS1_VALUES[%0d]]", prev_return_q[0], curr_return_q[0], ((prev_return_q[0] + 1) % 32), cio_pkg::SLOS1_VALUES[((prev_return_q[0] + 1) % 32)], cio_pkg::SLOS1_VALUES[curr_return_q[0]], curr_return_q[0]))
+            end
+            `uvm_info("HS_PC::check_compliance_pattern()", $sformatf("%0s: SLOS1: CHECK %0s for prev_prbs = %16h   data_in = %16h", dir.toupper(), err_flag == 1 ? "FAILED" : "PASSED", prev_sym.qwords[0], curr_sym.qwords[0]), UVM_MEDIUM) //FIXME: qwords 1 & 0? or prev and curr
+          end else begin
+            `uvm_error("HS_PC::check_compliance_pattern()", $sformatf("No check performed. Returning.  --- Illegal pattern type 0x%0h! Has an error been injected into the pattern symbol? ---", pattern))
+            return;
+          end
+          compliance_pattern_chk_count++;
+          if (!err_flag) compliance_coverage.sample_hs_cov(curr_sym, dir); //tx or rx
+        end else begin
+          `uvm_info("HS_PC::check_compliance_pattern()", $sformatf("%0s: Skipped pattern checking. prev_sym = %0s, curr_sym = %0s", dir.toupper(), prev_sym.convert2string(), curr_sym.convert2string()), UVM_FULL)
+        end
+      end
+    end // if (compliance_pattern_chk_en)
+  endfunction : check_compliance_pattern
+
+  //----------------------------------------------------------------------------------------------
+  // do_prbs_pattern_check
+  function bit do_prbs_pattern_check(input string dir = "[rt]x", input bit [63:0] prev_qw, input bit [63:0] curr_qw, inout bit skip_first_chk_en, inout bit skip_chk_until_pass_en, inout bit prbs_lock, input int prbs_len);
+    bit err_flag = 1;
+    string msg_str = "";
+
+    if ( !(dir.tolower() inside {"rx", "tx"}) ) begin
+      `uvm_error("HS_PC::do_prbs_pattern_check()", $sformatf("Illegal direction string %0s", dir))
+      return err_flag;
+    end
+    `uvm_info("HS_PC::do_prbs_pattern_check()", $sformatf(".dir(%0s), .prbs_len(%0d), .prev_qw(%16h), .curr_qw(%16h), skip_first(%0d), .skip_until_pass(%0d), prbs_lock(%0d)", dir, prbs_len, prev_qw, curr_qw, skip_first_chk_en, skip_chk_until_pass_en, prbs_lock), UVM_FULL) //FIXME: qwords 1 & 0? or prev and curr
+
+    // Symbols to check may be out of sync initially. This can be dealt with by:
+    //   1. Skipping the first check
+    //   2. Discard failing results until a passing result is seen
+    err_flag = cio_pkg::prbs_check_64(prbs_len, prev_qw, curr_qw, .silent(skip_first_chk_en || skip_chk_until_pass_en || count_and_report_rx_errors_en)); //FIXME: qwords 1 & 0? or prev and curr
+    if (skip_first_chk_en || skip_chk_until_pass_en) begin
+      if (err_flag) begin
+        `uvm_info("HS_PC::do_prbs_pattern_check()", $sformatf("%0s: PRBS%0d: 64 - INITIALIZING. Discarding %0s for prev_prbs = %16h, data_in = %16h, skip_first = %0d, skip_until_pass = %0d, prbs_lock = %0d", dir.toupper(), prbs_len, err_flag == 1 ? "FAIL" : "PASS", prev_qw, curr_qw, skip_first_chk_en, skip_chk_until_pass_en, prbs_lock), UVM_MEDIUM) //FIXME: qwords 1 & 0? or prev and curr
+/*return what here?*/        return 0; // Check discarded. Coverage not valid, check count increment invalidated.
+      end else begin
+        `uvm_info("HS_PC::do_prbs_pattern_check()", $sformatf("%0s: PRBS%0d: 64 - INITIALIZED. prbs locked -- %0s for prev_prbs = %16h, data_in = %16h, skip_first = %0d, skip_until_pass = %0d, prbs_lock = %0d", dir.toupper(), prbs_len, err_flag == 1 ? "FAIL" : "PASS", prev_qw, curr_qw, skip_first_chk_en, skip_chk_until_pass_en, prbs_lock), UVM_MEDIUM) //FIXME: qwords 1 & 0? or prev and curr
+        skip_chk_until_pass_en = 0;
+        prbs_lock = 1;
+        if (dir.tolower() == "rx") begin
+          rx_prbs_chk_prev_qw = curr_qw;
+        end else begin
+          tx_prbs_chk_prev_qw = curr_qw;
+        end
+      end
+      if (skip_first_chk_en) skip_first_chk_en = 0;
+    end
+    $sformat(msg_str, "%s%0s: PRBS%0d: 64 - CHECK %0s for prev_prbs = %16h, data_in = %16h", msg_str, dir.toupper(), prbs_len, err_flag == 1 ? "FAILED" : "PASSED", prev_qw, curr_qw); //FIXME: qwords 1 & 0? or prev and curr
+    if (err_flag) begin
+      if (count_and_report_rx_errors_en) begin
+        rx_pattern_mismatch_count++;
+        `uvm_warning("HS_PC::do_prbs_pattern_check()", $sformatf("%0s -- Incrementing mismatch couter to %0d", msg_str, rx_pattern_mismatch_count)) //FIXME: qwords 1 & 0? or prev and curr
+      end else begin
+        `uvm_error("HS_PC::do_prbs_pattern_check()", $sformatf("%0s", msg_str)) //FIXME: qwords 1 & 0? or prev and curr
+      end
+    end else begin
+      `uvm_info("HS_PC::do_prbs_pattern_check()", $sformatf("%0s", msg_str), UVM_HIGH) //FIXME: qwords 1 & 0? or prev and curr
+    end
+    return err_flag;
+  endfunction : do_prbs_pattern_check
+
+  //----------------------------------------------------------------------------------------------

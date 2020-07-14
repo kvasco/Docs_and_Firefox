@@ -1,0 +1,16 @@
+CIO VIP VPlan Review - 2019.07.17
+
+Anton, Canan, Huiju, Kevin, Jeff
+
+ARs
+[ ] Jeff, Kevin: update vplan status with completed items to date (chk/cov)
+[ ] Jeff: Anton has PRBS generator code available for reuse
+[ ] Jeff, Kevin: Lane distribution is not done in DUT. Remove checks? (Huiju)
+[ ] Jeff, Kevin: Power state checks and coverage should be done along with Power State implementation (they may be < priority 1)
+[ ] Jeff, Kevin: Add coverage for "system" items with sample function that is implemented by client (similar to triple check)
+[ ] Kevin: add "rtr"/"ext" in Status for router only items or external hook like triple check in vplan
+[ ] Christoph, Kevin, Jeff: get external sample example from Christoph
+[ ] Anton, CDN: explore spec annotation and highlighting from VPlan
+
+Notes
++ Canan & Huiju could work on checks and coverage while Kevin and Jeff work on adding new functionality (error inj & power states)

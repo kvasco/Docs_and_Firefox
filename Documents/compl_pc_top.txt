@@ -1,0 +1,57 @@
+class cio_ls_compliance_protocol_checker extends uvm_component;
+  localparam RSP = 0;
+  localparam CMD = 1;
+
+  virtual interface cio_hs_interface hvif;
+  virtual interface cio_hs_interface hvif_tx[mh16_param_pkg::CIO_NUM_HS_LANES];
+  virtual interface cio_hs_interface hvif_rx[mh16_param_pkg::CIO_NUM_HS_LANES];
+
+  cio_compliance_coverage compliance_coverage;
+  cio_protocol_checker  parent_handle, pc;  ///< Handle to parent (container) object
+  cio_env_cfg    env_cfg;  ///< Configuration object
+  int            lane_id;  ///< Which lane we're attached to
+
+  bit [31:0]                   op_metadata_dw_tx;
+  cio_port_operation_t         opcode_tx;
+  cio_compliance_pattern_t     pattern_tx;
+  cio_port_operation_adapter_t adapter;
+  bit [31:0]                   op_metadata_dw_rx;
+  cio_port_operation_t         opcode_rx;
+  cio_compliance_pattern_t     pattern_rx;
+
+  cio_ls_sequence_item_base ls_rx_pkt[1:0];  ///< Current LS Packet from RX monitor - 1 -> CMD pkt, 0 -> RSP pkt
+  cio_ls_sequence_item_base ls_tx_pkt[1:0];  ///< Current LS Packet from TX monitor - 1 -> CMD pkt, 0 -> RSP pkt
+
+  cio_hs_fsm_state_t m_hs_state     ;
+  cio_hs_fsm_state_t m_hs_rx_state  ;
+  cio_hs_fsm_state_t m_last_hs_state;
+
+  uvm_tlm_analysis_fifo #(cio_symbol_sequence_item) hs_symbol_fifo[mh16_param_pkg::CIO_NUM_HS_LANES];     ///< tx (?) symbols pulled off the wire. These are bit aligned and symbol aligned.
+  uvm_tlm_analysis_fifo #(cio_symbol_sequence_item) hs_rx_symbol_fifo[mh16_param_pkg::CIO_NUM_HS_LANES];  ///< rx symbols pulled off the wire. These are bit aligned and symbol aligned.
+
+  cio_symbol_sequence_item m_last_symbol;
+
+  bit ls_tx_compliance_active_lane[mh16_param_pkg::CIO_NUM_HS_LANES];
+  bit ls_rx_compliance_active_lane[mh16_param_pkg::CIO_NUM_HS_LANES];
+
+  integer hs_tx_prbs_len[mh16_param_pkg::CIO_NUM_HS_LANES];
+  integer hs_rx_prbs_len[mh16_param_pkg::CIO_NUM_HS_LANES];
+
+  cio_symbol_sequence_item hs_tx_prev_sym[mh16_param_pkg::CIO_NUM_HS_LANES];
+  cio_symbol_sequence_item hs_rx_prev_sym[mh16_param_pkg::CIO_NUM_HS_LANES];
+
+  // Compliance Check Enables
+  bit start_end_compliance_pair_chk_en = 1; ///< Enable Start/End Compliance Command Pairing Check
+  bit port_op_err_chk_en = 1;               ///< Enable Port Operation Error Result Check
+  bit port_op_not_supported_chk_en = 1;               ///< Enable Port Operation Command Not Supported Result Check
+  bit compliance_pattern_chk_en = 1;        ///< Enable HS DATA Compliance Pattern Check
+  // Compliance Check Counters
+  int start_end_compliance_pair_chk_count = 0; ///< Start/End Compliance Command Pairing Check Count
+  int port_op_err_chk_count = 0;               ///< Port Operation Result Check Count
+  int port_op_not_supported_chk_count = 0;     ///< Port Operation Command Not Supported Result Check Count
+  int compliance_pattern_chk_count =0;        ///< HS DATA Compliance Pattern Check Count
+
+  uvm_tlm_analysis_fifo #(cio_ls_sequence_item_base) ls_tx_fifo;  ///< Low Speed transactions from 'active' mon
+  uvm_tlm_analysis_fifo #(cio_ls_sequence_item_base) ls_rx_fifo;  ///< Low Speed transactions from 'passive' mon
+
+  `uvm_component_utils_begin(cio_ls_compliance_protocol_checker)

@@ -1,0 +1,202 @@
+//****************************************************************************
+// Copyright(C) 2019, Kandou Bus S.A.
+//
+// The information contained herein is Kandou Bus S.A. confidential
+// and proprietary information and is for use by Kandou Bus S.A.
+// customers only.  The information may not be reproduced or modified
+// in any form without the prior written of Kandou Bus S.A.
+// Kandou Bus S.A. reserves the right to make changes to the
+// information at any time without notice.
+//
+//***************************************************************************
+
+//------------------- File details ------------------------------------------
+// File name     : svtb/uvc_lib/sv/cio/cio_compliance_coverage.sv
+// Developers    : Kevin Vasconcellos (vascon@kandou.com, kevin.vasconcellos@verilab.com)
+// Created       : 13/11/19
+//---------------------------------------------------------------------------
+
+`ifndef __CIO_COMPLIANCE_COVERAGE_SV__
+`define __CIO_COMPLIANCE_COVERAGE_SV__
+
+/// @class cio_compliance_coverage
+/// Coverage component to gather CIO base cfg coverage
+class cio_compliance_coverage extends uvm_component;
+  cio_ls_sequence_item_base item;
+  cio_rt_sequence_item_base rt;
+  cio_symbol_sequence_item symbol;
+
+  bit coverage_enable = 1;
+
+  bit [3:0] pattern = 'hA; // Invalid pattern value
+  bit [31:0] port_op = 0;
+
+  `uvm_component_utils_begin(cio_compliance_coverage)
+    `uvm_field_int (coverage_enable, UVM_ALL_ON)
+  `uvm_component_utils_end
+
+  //------------------------------------------------------------------------------
+  /// functional coverage
+  //------------------------------------------------------------------------------
+  covergroup cio_ls_compliance_port_op_cg with function sample(bit [31:0] data_val, bit [31:0] result_val);
+    option.per_instance = 1;
+    port_operation : coverpoint data_val {
+      // Base Spec
+      bins SET_TX_COMPLIANCE     = {SET_TX_COMPLIANCE_VAL};
+      bins SET_RX_COMPLIANCE     = {SET_RX_COMPLIANCE_VAL};
+      bins START_BER_TEST        = {START_BER_TEST_VAL};
+      bins END_BER_TEST          = {END_BER_TEST_VAL};
+      bins END_BURST_TEST        = {END_BURST_TEST_VAL};
+      bins READ_BURST_TEST       = {READ_BURST_TEST_VAL};
+      bins ENTER_EI_TEST         = {ENTER_EI_TEST_VAL};
+      bins ROUTER_OFFLINE_MODE   = {ROUTER_OFFLINE_MODE_VAL};
+      bins ENUMERATE_RETIMERS    = {ENUMERATE_RETIMERS_VAL};
+      bins READ_LANE_MARGIN_CAP  = {READ_LANE_MARGIN_CAP_VAL};
+      bins RUN_HW_LANE_MARGINING = {RUN_HW_LANE_MARGINING_VAL};
+      bins RUN_SW_LANE_MARGINING = {RUN_SW_LANE_MARGINING_VAL};
+      bins READ_SW_MARGIN_ERR    = {READ_SW_MARGIN_ERR_VAL};
+      // Retimer Spec
+      bins QUERY_LAST_RETIMER    = {QUERY_LAST_RETIMER_VAL};
+      bins QUERY_CABLE_RETIMER   = {QUERY_CABLE_RETIMER_VAL};
+      bins GET_RX_TXFFE_PRESET   = {GET_RX_TXFFE_PRESET_VAL};
+      bins ACK_RX_TXFFE_PRESET   = {ACK_RX_TXFFE_PRESET_VAL};
+      bins SET_INBOUND_SBTX      = {SET_INBOUND_SBTX_VAL};
+      bins UNSET_INBOUND_SBTX    = {UNSET_INBOUND_SBTX_VAL};
+      bins GET_NVM_SECTOR_SIZE   = {GET_NVM_SECTOR_SIZE_VAL};
+      bins NVM_SET_OFFSET        = {NVM_SET_OFFSET_VAL};
+      bins NVM_BLOCK_WRITE       = {NVM_BLOCK_WRITE_VAL};
+      bins NVM_AUTH_WRITE        = {NVM_AUTH_WRITE_VAL};
+      bins NVM_READ              = {NVM_READ_VAL};
+      //bins ignore  = ;
+    }
+
+    port_op_result : coverpoint result_val {
+      bins SUCCESS = {32'h0};
+      bins ERR     = {32'h20525245};
+      bins CMD     = {32'h444D4321};
+      //bins UNKNOWN = {32'hBAD1BAD1};
+      //bins ignore  = ;
+    }
+
+    port_op_x_result : cross port_operation, port_op_result iff (1);
+  endgroup
+
+  covergroup cio_ls_compliance_pattern_cg with function sample(bit [31:0] data_val, bit [3:0] pattern_val);
+    option.per_instance = 1;
+    port_operation : coverpoint data_val {
+      // Base Spec
+      bins SET_TX_COMPLIANCE     = {SET_TX_COMPLIANCE_VAL};
+      bins START_BER_TEST        = {START_BER_TEST_VAL};
+      //bins ignore  = ;
+    }
+
+    compliance_pattern : coverpoint pattern_val {
+      bins PRBS31        = {4'b0000};
+      bins PRBS15        = {4'b0001};
+      bins PRBS9         = {4'b0010};
+      bins PRBS7         = {4'b0011};
+      bins SQ2           = {4'b0100};
+      bins SQ4           = {4'b0101};
+      bins SQ32          = {4'b0110};
+      bins SQ128         = {4'b0111};
+      bins SLOS1_pattern = {4'b1111};
+      //bins ignore  = ;
+    }
+
+    port_op_x_pattern : cross port_operation, compliance_pattern iff (1);
+  endgroup
+
+  covergroup cio_hs_compliance_pattern_cg with function sample(bit [31:0] data_val, bit [3:0] pattern_val);
+    option.per_instance = 1;
+    compliance_pattern : coverpoint pattern_val {
+      bins PRBS31        = {4'b0000};
+      bins PRBS15        = {4'b0001};
+      bins PRBS9         = {4'b0010};
+      bins PRBS7         = {4'b0011};
+      bins SQ2           = {4'b0100};
+      bins SQ4           = {4'b0101};
+      bins SQ32          = {4'b0110};
+      bins SQ128         = {4'b0111};
+      bins SLOS1_pattern = {4'b1111};
+      //bins ignore  = ;
+    }
+  endgroup
+
+  //-----------------------------------------------------------------------------------------------
+  /// Constructor
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+    `uvm_info(get_type_name(), $sformatf("DEBUG_COV : cio_compliance_coverage::new()"), UVM_DEBUG)
+    cio_ls_compliance_port_op_cg = new();
+    cio_ls_compliance_port_op_cg.option.name = $sformatf("%s_cio_ls_compliance_port_op", get_name());
+    cio_ls_compliance_pattern_cg = new();
+    cio_ls_compliance_pattern_cg.option.name = $sformatf("%s_cio_ls_compliance_pattern", get_name());
+    cio_hs_compliance_pattern_cg = new();
+    cio_hs_compliance_pattern_cg.option.name = $sformatf("%s_cio_hs_compliance_pattern", get_name());
+  endfunction : new
+
+  //-----------------------------------------------------------------------------------------------
+  /// UVM Build_phase
+  virtual function void build_phase(uvm_phase phase);
+    super.build_phase(phase);
+  endfunction : build_phase
+
+  //-----------------------------------------------------------------------------------------------
+  /// UVM connect_phase
+  virtual function void connect_phase(uvm_phase phase);
+    super.connect_phase(phase);
+    // reference back-pointer to parent container
+    $cast(parent_env, get_parent());
+    $cast(cfg, parent_env.cfg);
+  endfunction : connect_phase
+
+/* -----\/----- EXCLUDED -----\/-----
+  //-----------------------------------------------------------------------------------------------
+  /// UVM extract_phase
+  virtual function void extract_phase(uvm_phase phase);
+    super.extract_phase(phase);
+    $cast(cfg, parent_env.cfg);
+    //cio_compliance_cg.option.name = $sformatf("%s", get_name());
+    `uvm_info(get_name(), $sformatf("cio_compliance_coverage::extract_phase(): Coverage is %0senabled. Sampleing now (if enabled).", (coverage_enable ? "" : "not ")), UVM_MEDIUM)
+    if (coverage_enable) this.cio_compliance_cg.sample();
+    if (coverage_enable) this.cio_ls_link_cg.sample(cfg.is_bidir());
+    if (coverage_enable) this.cio_hs_config_cg.sample();
+  endfunction : extract_phase
+
+ -----/\----- EXCLUDED -----/\----- */
+  //-----------------------------------------------------------------------------------------------
+  /// Sample coverage. Sample coverage on the cio_compliance_cg covergroup
+//  function void sample_cov (ref cio_ls_sequence_item_base trans);
+  function void sample_cov (ref cio_compliance_sequence_item_base trans);
+    this.cfg = trans;
+
+    if (trans.trans_type == RT_TRANS) begin
+//      `uvm_info(get_type_name(),"RT_TRANS",UVM_LOW);
+      if (!$cast(m_rt_item, trans)) `uvm_fatal(get_full_name(), "Couldn't cast RT Transaction");
+      cio_ls_rt_cg.sample();
+
+      //--------------------------------------------------
+      //-- Collect data for compliance and sample
+      //--------------------------------------------------
+      if (m_rt_item.reg_addr == OPDCOE_REG && write && cmd) begin
+      if (m_rt_item.reg_addr == METADATA_REG && write && cmd) begin
+        //sample port op
+        cio_ls_compliance_cg.sample({m_rt_item.data[5], m_rt_item.data[4], m_rt_item.data[3], m_rt_item.data[2]}, pattern);
+        if (item.write_data == op with pattern)
+          // sample stored pattern
+          cio_ls_compliance_cg.sample();
+      end else if addr && read && rspbegin
+        //sample cpl code
+       cio_ls_compliance_cg.sample();
+      end
+      if (reg_addr == METADATA) begin
+        // store pattern
+      end
+    end // if (trans.trans_type == RT_TRANS)
+
+    cio_compliance_cg.sample();
+  endfunction
+
+endclass : cio_compliance_coverage
+
+`endif // __CIO_COMPLIANCE_COVERAGE_SV__
